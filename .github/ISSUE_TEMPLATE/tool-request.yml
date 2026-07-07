@@ -1,0 +1,46 @@
+name: Tool request
+description: Ask for a new browser-only tool — no code needed, describing the need is the whole job.
+title: "[request] "
+labels: ["tool-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks — requests are how most tools here start. Two minutes of detail
+        is enough; a maintainer will reply with `accepted`, `needs-info` or
+        `declined` (always with a reason). Accepted requests are built by the
+        maintainers and reviewed like any other code.
+  - type: textarea
+    id: what
+    attributes:
+      label: What should it do?
+      description: What goes in, what comes out.
+      placeholder: "e.g. I drop an audio file in, I get the same file back with silence trimmed from both ends."
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When would you reach for it?
+      description: The real situation that made you want this.
+      placeholder: "e.g. voice memos I share in chats always have 5 dead seconds at the start."
+    validations:
+      required: true
+  - type: textarea
+    id: clientside
+    attributes:
+      label: Why can it run purely in the browser?
+      description: >
+        Optional — every tool here works without uploads or servers. If you
+        know of a browser API or an existing offline tool that proves it's
+        possible, mention it. If you don't know, leave this empty; we'll
+        figure it out during triage.
+    validations:
+      required: false
+  - type: textarea
+    id: refs
+    attributes:
+      label: Similar tools or references
+      description: Optional — links to anything that does this today (even server-based ones).
+    validations:
+      required: false

@@ -1,0 +1,50 @@
+name: Tool proposal (I want to build it)
+description: You plan to write the module yourself — open this BEFORE coding so we can confirm the fit and protect your time.
+title: "[proposal] "
+labels: ["tool-proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Great — read [CONTRIBUTING.md](https://github.com/subnsub-tools/community-tools/blob/main/CONTRIBUTING.md)
+        first if you haven't. This form exists so we can say "yes, that fits"
+        (or explain why not) **before** you invest in an implementation.
+  - type: textarea
+    id: what
+    attributes:
+      label: What does it do?
+      description: What goes in, what comes out, and the one job it does.
+    validations:
+      required: true
+  - type: textarea
+    id: api
+    attributes:
+      label: Module API sketch
+      description: The exports you have in mind — function signatures and the caps you'll enforce.
+      placeholder: |
+        export const MAX_BYTES = 64 * 1024 * 1024;
+        export function analyze(bytes) { ... }   // → { report } | null on malformed input
+      render: js
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Malformed-input surface
+      description: >
+        What does a hostile file look like for this tool (truncated headers,
+        lying length fields, decompression bombs…) and how will you fail
+        closed? A rough answer is fine — review will probe this hardest.
+    validations:
+      required: true
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Ground rules
+      options:
+        - label: "Client-side only: no network calls, no storage, no telemetry."
+          required: true
+        - label: "Zero dependencies: one readable ES module + a plain demo.html."
+          required: true
+        - label: I agree to license the contribution under AGPL-3.0.
+          required: true

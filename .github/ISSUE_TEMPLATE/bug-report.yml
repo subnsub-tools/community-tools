@@ -1,0 +1,55 @@
+name: Bug report
+description: A tool in this repo (or its site version) misbehaves on a real input.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For **security-sensitive** findings (a guard that can be bypassed, a
+        parser that can be crashed into misbehaving) please use
+        [private vulnerability reporting](https://github.com/subnsub-tools/community-tools/security/advisories/new)
+        instead of a public issue.
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool?
+      options:
+        - encrypt (File Encrypt)
+        - exif (EXIF Cleaner)
+        - pdf (PDF Tools)
+        - imgconv (Image Convert)
+        - wmark (Watermark)
+        - rec (Screen Recorder)
+        - blank (New File)
+        - stego (Stego Detector)
+        - other / repo-wide
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did you hit it?
+      options:
+        - demo.html in this repo
+        - the styled version on subnsub.com
+        - both
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: What happened, and how to reproduce it
+      description: >
+        Steps + what you expected vs. what you got. If a specific file
+        triggers it and you can share it (or a scrubbed equivalent), attach
+        it — parser bugs are nearly impossible to fix without the bytes.
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser & OS
+      placeholder: "e.g. Firefox 141 / macOS 15"
+    validations:
+      required: true

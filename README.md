@@ -47,6 +47,14 @@ python3 -m http.server 8000
   their own authors and are credited on their cards; this repo covers the
   tools we built ourselves.
 
+## Contributing
+
+Want a tool that isn't here? **[Request it](https://github.com/subnsub-tools/community-tools/issues/new/choose)** —
+describing the need is the whole job, no code required. Want to build it
+yourself? [CONTRIBUTING.md](CONTRIBUTING.md) covers the module shape, the
+review checklist, and how a merged tool ends up in the Community tab on
+subnsub.com credited to you.
+
 ## License
 
 [AGPL-3.0](LICENSE) © 2026 SUB&SUB LLC.
