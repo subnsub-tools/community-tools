@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>File Encrypt — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin: 1rem 0 .25rem; }
+  input, button { font: inherit; }
+  #status { margin-top: 1rem; white-space: pre-wrap; }
+  .err { color: #b00020; }
+</style>
+
+<h1>File Encrypt — demo</h1>
+<p>Seals a file with AES-256-GCM (PBKDF2-SHA256, 600k iterations), fully
+in-browser. Pick a regular file to encrypt it, or a <code>.snse</code> file to
+decrypt it. Needs HTTPS or localhost.</p>
+
+<label>File <input type="file" id="file"></label>
+<label>Passphrase <input type="password" id="pass"></label>
+<button id="run">Run</button>
+<p id="status"></p>
+
+<script type="module">
+  import { seal, open, looksSealed } from './encrypt.js';
+
+  const $ = (id) => document.getElementById(id);
+  const status = (msg, err) => { $('status').textContent = msg; $('status').className = err ? 'err' : ''; };
+
+  $('run').onclick = async () => {
+    const file = $('file').files[0];
+    const pass = $('pass').value;
+    if (!file || !pass) return status('Choose a file and enter a passphrase first.', true);
+    status('Working…');
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let blob, name;
+      if (looksSealed(bytes)) {
+        const r = await open(bytes, pass);
+        blob = new Blob([r.bytes], { type: r.type });
+        name = r.name;
+      } else {
+        blob = new Blob([await seal(bytes, { name: file.name, type: file.type }, pass)]);
+        name = file.name + '.snse';
+      }
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);   /* immediate revoke can cancel the download */
+      status(`Done — downloaded ${name} (${blob.size} bytes).`);
+    } catch (e) {
+      status(e.code === 'magic' ? 'Not an SNSE1 file.'
+        : e.code === 'pass' ? 'Wrong passphrase or corrupted file.'
+        : 'Failed: ' + e.message, true);
+    }
+  };
+</script>

@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Image Convert — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin: .75rem 0; }
+  .err { color: #b00020; }
+</style>
+
+<h1>Image Convert — demo</h1>
+<p>Re-encode an image to JPEG / PNG / WebP, fully in-browser. (This demo has
+no HEIC wasm decoder wired in — Safari still opens HEIC natively.)</p>
+
+<label>Image <input type="file" id="file" accept="image/*"></label>
+<label>Format
+  <select id="fmt"><option>jpeg</option><option>png</option><option>webp</option></select>
+</label>
+<label>Quality <input type="range" id="q" min="1" max="100" value="85"> <span id="qv">85%</span></label>
+<button id="run" disabled>Convert</button>
+<p id="status"></p>
+
+<script type="module">
+  import { decodeImage, convert } from './imgconv.js';
+
+  const $ = (id) => document.getElementById(id);
+  const status = (m, e) => { $('status').textContent = m; $('status').className = e ? 'err' : ''; };
+  let decoded = null;
+  let pickSeq = 0;   /* a slow decode must not overwrite a newer pick */
+
+  $('q').oninput = () => { $('qv').textContent = $('q').value + '%'; };
+
+  $('file').onchange = async () => {
+    const seq = ++pickSeq;
+    if (decoded) { URL.revokeObjectURL(decoded.url); decoded = null; }
+    $('run').disabled = true;
+    const f = $('file').files[0];
+    if (!f) return;
+    status('Reading…');
+    try {
+      const d = await decodeImage(f);
+      if (seq !== pickSeq) { URL.revokeObjectURL(d.url); return; }
+      decoded = d;
+      status(`${decoded.w}×${decoded.h}`);
+      $('run').disabled = false;
+    } catch (e) {
+      if (seq !== pickSeq) return;
+      status(e.code === 'pixels' ? `Too large (${e.mp} MP — 64 MP max).` : 'Could not decode this image.', true);
+    }
+  };
+
+  $('run').onclick = async () => {
+    const fmt = $('fmt').value;
+    try {
+      const blob = await convert(decoded, fmt, parseInt($('q').value, 10) / 100);
+      const a = Object.assign(document.createElement('a'), {
+        href: URL.createObjectURL(blob), download: 'converted.' + (fmt === 'jpeg' ? 'jpg' : fmt),
+      });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      status(`Done — ${blob.size} bytes.`);
+    } catch (_) {
+      status(`This browser cannot encode ${fmt.toUpperCase()} — try another format.`, true);
+    }
+  };
+</script>

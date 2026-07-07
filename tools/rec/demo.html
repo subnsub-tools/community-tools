@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Screen Recorder — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  label { margin-right: 1rem; }
+  video { max-width: 100%; margin-top: 1rem; }
+  button { margin-right: .5rem; }
+  .err { color: #b00020; }
+</style>
+
+<h1>Screen Recorder — demo</h1>
+<p>Capture to a local file — nothing uploaded. Desktop browsers only.</p>
+
+<p>
+  <label><input type="checkbox" id="sys" checked> System audio</label>
+  <label><input type="checkbox" id="mic"> Microphone</label>
+</p>
+<button id="start">Start</button>
+<button id="pause" disabled>Pause</button>
+<button id="stop" disabled>Stop</button>
+<p id="live"></p>
+<video id="prev" controls hidden></video>
+<p id="status"></p>
+
+<script type="module">
+  import { ScreenRecorder } from './recorder.js';
+
+  const $ = (id) => document.getElementById(id);
+  const status = (m, e) => { $('status').textContent = m; $('status').className = e ? 'err' : ''; };
+  let rec = null;
+  let lastUrl = null;   /* preview + download share one URL; revoke on replace */
+
+  if (!ScreenRecorder.isSupported()) {
+    status('This browser does not expose screen capture (phones don’t).', true);
+    $('start').disabled = true;
+  }
+
+  $('start').onclick = async () => {
+    $('start').disabled = true;   /* a double-click must not spawn a second recorder */
+    rec = new ScreenRecorder({ systemAudio: $('sys').checked, microphone: $('mic').checked });
+    rec.onwarning = (c) => status(c === 'mic-unavailable'
+      ? 'Microphone unavailable — recording continues without it.'
+      : 'The picked source provided no system audio — tick "Share audio" in the picker next time.');
+    rec.onprogress = ({ state, bytes, durationMs }) => {
+      $('live').textContent = `${state} — ${(durationMs / 1000).toFixed(0)}s, ${(bytes / 1048576).toFixed(1)} MB`;
+    };
+    try {
+      await rec.start();
+    } catch (e) {
+      if (e.code !== 'cancelled') status('Could not start recording.', true);
+      $('start').disabled = false;
+      return;
+    }
+    $('pause').disabled = false; $('stop').disabled = false;
+    $('prev').hidden = true;
+    try {
+      const { blob, mimeType, durationMs } = await rec.finished;
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      const url = lastUrl = URL.createObjectURL(blob);
+      $('prev').src = url; $('prev').hidden = false;
+      const a = Object.assign(document.createElement('a'), {
+        href: url, download: 'screen.' + (/mp4/.test(mimeType) ? 'mp4' : 'webm'),
+      });
+      a.click();
+      status(`Ready — ${(durationMs / 1000).toFixed(0)}s, ${(blob.size / 1048576).toFixed(1)} MB.`);
+    } catch (_) {
+      status('Recording failed.', true);
+    } finally {
+      $('start').disabled = false; $('pause').disabled = true; $('stop').disabled = true;
+      $('pause').textContent = 'Pause';
+      $('live').textContent = '';
+    }
+  };
+
+  $('pause').onclick = () => {
+    if (rec.state === 'rec') { rec.pause(); $('pause').textContent = 'Resume'; }
+    else { rec.resume(); $('pause').textContent = 'Pause'; }
+  };
+  $('stop').onclick = () => rec.stop();
+</script>

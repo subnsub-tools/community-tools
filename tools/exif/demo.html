@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>EXIF Cleaner — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  #report { margin: 1rem 0; }
+  #report div { display: flex; justify-content: space-between; gap: 1rem; }
+  #report .warn { font-weight: 600; }
+  .err { color: #b00020; }
+</style>
+
+<h1>EXIF Cleaner — demo</h1>
+<p>Byte-level metadata strip for JPEG / PNG / WebP — pixels are copied
+verbatim, never re-encoded. Everything runs locally.</p>
+
+<input type="file" id="file" accept=".jpg,.jpeg,.png,.webp">
+<div id="report"></div>
+<button id="run" hidden>Clean &amp; download</button>
+<p id="status"></p>
+
+<script type="module">
+  import { analyze } from './exif-clean.js';
+
+  const $ = (id) => document.getElementById(id);
+  let picked = null;
+  let pickSeq = 0;   /* a slow read must not repopulate the UI over a newer pick */
+
+  $('file').onchange = async () => {
+    const seq = ++pickSeq;
+    const f = $('file').files[0];
+    $('report').innerHTML = '';
+    $('run').hidden = true;
+    $('status').textContent = '';
+    if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    if (seq !== pickSeq) return;
+    const report = analyze(bytes);
+    if (report === undefined) { $('status').textContent = 'Only JPEG, PNG and WebP are supported.'; return; }
+    if (!report) { $('status').textContent = 'Could not parse this file — it may be corrupted.'; return; }
+    picked = { name: f.name, report };
+    const t = report.tiff;
+    const rows = [];
+    if (t) {
+      const cam = [t.make, t.model].filter(Boolean).join(' ');
+      if (cam) rows.push(['Camera', cam]);
+      if (t.dto || t.dt) rows.push(['Taken', t.dto || t.dt]);
+      if (t.gps) rows.push(['Location', t.gps.lat.toFixed(5) + ', ' + t.gps.lon.toFixed(5), 'warn']);
+      if (t.software) rows.push(['Software', t.software]);
+    }
+    report.strips.forEach((s) => rows.push([s.label + (s.id ? ' · ' + s.id : ''), s.size + ' B']));
+    if (!rows.length) rows.push(['Already clean', '—']);
+    for (const [k, v, cls] of rows) {
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.innerHTML = `<span></span><span></span>`;
+      div.children[0].textContent = k;
+      div.children[1].textContent = v;
+      $('report').appendChild(div);
+    }
+    $('run').hidden = !report.strips.length;
+  };
+
+  $('run').onclick = () => {
+    const { name, report } = picked;
+    const blob = new Blob(report.rebuild(), { type: report.mime });
+    const base = name.replace(/\.[^.]*$/, '') || 'image';
+    const a = Object.assign(document.createElement('a'),
+      { href: URL.createObjectURL(blob), download: base + '-clean.' + report.ext });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    $('status').textContent = `Done — removed ${report.strips.length} block(s).` +
+      (report.orientNote ? ' A minimal orientation flag was kept.' : '');
+  };
+</script>

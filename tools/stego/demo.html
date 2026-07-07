@@ -1,0 +1,111 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>LSB Stego Detector — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+  #chans span { display: inline-block; margin-right: 1.25rem; }
+  #map { display: flex; align-items: flex-end; gap: 1px; height: 48px; margin: .75rem 0; }
+  #map i { flex: 1; background: #888; min-height: 2px; }
+  canvas { max-width: 100%; image-rendering: pixelated; border: 1px solid #8884; }
+  pre { overflow-x: auto; font-size: 12px; background: #8881; padding: .5rem; }
+  .err { color: #b00020; }
+</style>
+
+<h1>LSB Stego Detector — demo</h1>
+<p>Chi-square LSB steganalysis + bit-plane viewer + extractor, fully local.</p>
+
+<input type="file" id="file" accept="image/*">
+<p id="verdict"></p>
+<p id="chans"></p>
+<div id="map" hidden></div>
+<p>
+  <label>Plane <select id="pchan"><option>rgb</option><option>r</option><option>g</option><option>b</option></select></label>
+  <label>Bit <input type="range" id="pbit" min="0" max="7" value="0"> <span id="pbitv">0 (LSB)</span></label>
+</p>
+<canvas id="plane" hidden></canvas>
+<h2>Extract</h2>
+<p id="meta"></p>
+<pre id="out"></pre>
+
+<script type="module">
+  import { analyzeChannels, segmentScan, bitPlane, extractBits, detectMagic,
+           toPrintable, toHexDump, MAX_PIXELS, MAX_DIM } from './stego-analyze.js';
+
+  const $ = (id) => document.getElementById(id);
+  let IMG = null;
+  let pickSeq = 0;   /* a slow decode must not overwrite a newer pick */
+
+  $('file').onchange = () => {
+    const seq = ++pickSeq;
+    const f = $('file').files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => {
+      URL.revokeObjectURL(url);
+      if (seq !== pickSeq) return;
+      const w = im.naturalWidth, h = im.naturalHeight;
+      if (w > MAX_DIM || h > MAX_DIM || w * h > MAX_PIXELS) {
+        $('verdict').textContent = 'Image too large to analyse — downscale it first.';
+        return;
+      }
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const cx = cv.getContext('2d', { willReadFrequently: true });
+      cx.drawImage(im, 0, 0);
+      IMG = { data: cx.getImageData(0, 0, w, h).data, w, h };
+      analyze();
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); $('verdict').textContent = 'Could not decode that image.'; };
+    im.src = url;
+  };
+
+  function analyze() {
+    const { data, w, h } = IMG;
+    const { channels, maxP } = analyzeChannels(data, w, h);
+    $('verdict').textContent = maxP >= 0.9 ? '⚠ Likely hidden data in the LSB plane.'
+      : maxP >= 0.3 ? 'Suspicious — some channels look modified.'
+      : 'Clean — no obvious LSB steganography.';
+    $('chans').innerHTML = '';
+    for (const c of channels) {
+      const s = document.createElement('span');
+      s.textContent = `${c.key}: ${c.constant ? '—' : (c.p * 100).toFixed(1) + '%'} (LSB set ${(c.ratio * 100).toFixed(1)}%)`;
+      $('chans').appendChild(s);
+    }
+    const map = segmentScan(data, w, h);
+    $('map').hidden = !map;
+    if (map) {
+      $('map').innerHTML = '';
+      for (const p of map) {
+        const i = document.createElement('i');
+        i.style.height = Math.max(3, p * 100) + '%';
+        i.title = (p * 100).toFixed(1) + '%';
+        $('map').appendChild(i);
+      }
+    }
+    plane();
+    extract();
+  }
+
+  function plane() {
+    if (!IMG) return;
+    const bit = +$('pbit').value;
+    $('pbitv').textContent = bit + (bit === 0 ? ' (LSB)' : bit === 7 ? ' (MSB)' : '');
+    const { data, w, h } = IMG;
+    const cv = $('plane');
+    cv.width = w; cv.height = h; cv.hidden = false;
+    cv.getContext('2d').putImageData(new ImageData(bitPlane(data, w, h, $('pchan').value, bit), w, h), 0, 0);
+  }
+
+  function extract() {
+    const { data, w, h } = IMG;
+    const { bytes, total } = extractBits(data, w, h, { channels: ['r', 'g', 'b'], bit: 0 });
+    const sig = detectMagic(bytes);
+    $('meta').textContent = `${total.toLocaleString()} bytes readable (showing first ${bytes.length})` +
+      (sig ? ` — signature: ${sig.label}${sig.chars ? ' (' + sig.chars + ' chars)' : ''}` : '');
+    $('out').textContent = bytes.length ? toPrintable(bytes) : '(no data)';
+  }
+
+  $('pchan').onchange = plane;
+  $('pbit').oninput = plane;
+</script>

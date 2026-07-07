@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Watermark — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin: .75rem 0; }
+  canvas { max-width: 100%; border: 1px solid #8884; }
+  .err { color: #b00020; }
+</style>
+
+<h1>Watermark — demo</h1>
+<p>Tiled text watermark, fully in-browser. Pick images, tweak, download
+(single file, or a ZIP for several).</p>
+
+<label>Images <input type="file" id="file" accept="image/*" multiple></label>
+<label>Text <input id="text" value="CONFIDENTIAL" size="30"></label>
+<label>Size % <input type="range" id="size" min="1" max="20" value="4"></label>
+<label>Opacity % <input type="range" id="alpha" min="5" max="100" value="35"></label>
+<label>Gap × <input type="range" id="gap" min="0.5" max="4" step="0.5" value="1.5"></label>
+<canvas id="prev" hidden></canvas>
+<br><button id="run" disabled>Watermark</button>
+<p id="status"></p>
+
+<script type="module">
+  import { watermarkImage, paintWatermark, makeZip, dedupeNames } from './watermark.js';
+
+  const $ = (id) => document.getElementById(id);
+  const status = (m, e) => { $('status').textContent = m; $('status').className = e ? 'err' : ''; };
+  const opts = () => ({ text: $('text').value.trim(), color: '#ffffff',
+    sizePct: +$('size').value, alpha: +$('alpha').value / 100, gapK: +$('gap').value });
+  let firstUrl = null, firstImg = null;
+  let pickSeq = 0;   /* a slow preview decode must not overwrite a newer pick */
+
+  function preview() {
+    if (!firstImg) return;
+    const w = firstImg.naturalWidth, h = firstImg.naturalHeight;
+    const k = Math.min(1, 800 / Math.max(w, h));
+    const cv = $('prev');
+    cv.width = Math.round(w * k); cv.height = Math.round(h * k);
+    const cx = cv.getContext('2d');
+    cx.drawImage(firstImg, 0, 0, cv.width, cv.height);
+    paintWatermark(cx, cv.width, cv.height, opts());
+    cv.hidden = false;
+  }
+
+  $('file').onchange = () => {
+    const seq = ++pickSeq;
+    const f = $('file').files[0];
+    $('run').disabled = !$('file').files.length;
+    if (firstUrl) URL.revokeObjectURL(firstUrl);
+    firstImg = null; $('prev').hidden = true;
+    if (!f) return;
+    firstUrl = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => { if (seq !== pickSeq) return; firstImg = im; preview(); };
+    im.src = firstUrl;
+  };
+  ['text', 'size', 'alpha', 'gap'].forEach((id) => { $(id).oninput = preview; });
+
+  $('run').onclick = async () => {
+    const files = [...$('file').files];
+    if (!files.length || !opts().text) return status('Pick images and enter text first.', true);
+    status('Working…');
+    try {
+      const runOpts = opts();   /* snapshot once — mid-batch slider edits must not mix settings */
+      const results = [];
+      for (const f of files) results.push(await watermarkImage(f, runOpts));
+      dedupeNames(results);
+      const one = results.length === 1;
+      const blob = one ? new Blob([results[0].u8]) : makeZip(results);
+      const a = Object.assign(document.createElement('a'), {
+        href: URL.createObjectURL(blob), download: one ? results[0].name : 'watermarked.zip',
+      });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      status(`Done — ${results.length} image(s).`);
+    } catch (e) {
+      status('Failed (' + (e.code || e.message) + ')' + (e.fileName ? ': ' + e.fileName : ''), true);
+    }
+  };
+</script>
