@@ -15,4 +15,5 @@ Checklist (see [CONTRIBUTING.md](https://github.com/subnsub-tools/community-tool
 - [ ] Malformed input fails closed — truncated/lying inputs were actually tried
 - [ ] `demo.html` drives the change end to end from a bare `python3 -m http.server`
 - [ ] No minified or generated code; comments match the existing style
-- [ ] I agree to license this contribution under AGPL-3.0
+- [ ] This is my own work — anything derived from someone else's code or spec is declared above
+- [ ] I have the right to submit this and agree to license it under AGPL-3.0

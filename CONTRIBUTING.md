@@ -12,8 +12,9 @@ Every tool here makes the same promise, so every submission must keep it:
   uploads, no accounts, no telemetry, no analytics. If the job fundamentally
   needs a backend, it doesn't fit this collection.
 - **Dependency-free core.** One ES module a reviewer can read top to bottom.
-  No npm packages, no build step, no minified or generated code. (pdf-lib is
-  the single, declared exception — don't plan on adding another.)
+  No npm packages, no build step, no minified or generated code. (The pinned
+  pdf-lib reference is a grandfathered exception that belongs to the existing
+  `tools/pdf` only — new tools ship with zero dependencies, no exceptions.)
 - **One tool, one job.** A small, sharp scope beats a Swiss Army knife.
 - **Not a duplicate.** If an existing tool almost does it, improve that
   module instead — a focused PR to an existing tool lands much faster than a
@@ -75,7 +76,8 @@ tools/<id>/
   explain *constraints*, not what the next line does).
 
 **The demo page** proves the module works without any site plumbing: plain
-HTML, one `<script type="module">`, no external resources, no CSS framework.
+HTML, one `<script type="module">`, no external resources (the pdf demo's
+pinned pdf-lib fetch is grandfathered, not a precedent), no CSS framework.
 It must run from a bare static server:
 
 ```
@@ -104,7 +106,9 @@ Merging into this repository and appearing on subnsub.com are separate
 steps:
 
 1. **Merge** — your module lands here under AGPL-3.0, credited to your
-   GitHub account (we merge preserving you as the commit author).
+   GitHub account (we merge preserving you as the commit author; substantial
+   maintainer-side changes land as their own commits or are noted in the
+   merge, so authorship stays honest in both directions).
 2. **Site integration** — the maintainers wrap the module in the site's UI,
    design system, translations and offline plumbing. You don't do any of
    this part, and the site version's logic is kept in lockstep with your
@@ -120,9 +124,12 @@ silent divergence.
 
 ## Licensing
 
-This repository is AGPL-3.0. By opening a pull request you agree to license
-your contribution under AGPL-3.0. You keep your copyright; no CLA, no
-paperwork. "SUB&SUB", "subnsub" and the site's visual identity remain
+This repository is AGPL-3.0. By opening a pull request you confirm the
+contribution is yours to license — your own work, with anything derived
+from someone else's code or spec declared in the PR — and you agree to
+license it under AGPL-3.0. You keep your copyright; no CLA, no paperwork.
+Undisclosed copied code is grounds for rejection, or removal if it's found
+after a merge. "SUB&SUB", "subnsub" and the site's visual identity remain
 unlicensed by this repository.
 
 ## Security issues in existing tools
