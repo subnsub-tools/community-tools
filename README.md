@@ -43,9 +43,11 @@ python3 -m http.server 8000
 - **It is not the site.** The UI shell, design system, i18n and account
   plumbing of subnsub.com are not part of this repository. The demo pages
   here are deliberately unstyled.
-- Third-party tools listed in the Community tab (e.g. WLOC) live with
-  their own authors and are credited on their cards; this repo covers the
-  tools we built ourselves.
+- Independently hosted third-party tools listed in the Community tab
+  (e.g. WLOC) live with their own authors and are credited on their cards.
+  This repo hosts the tools we built ourselves — and community-contributed
+  modules accepted through the [contribution pipeline](CONTRIBUTING.md),
+  credited to their authors.
 
 ## Contributing
 

@@ -100,7 +100,8 @@ through several. The checklist reviewers work from:
 
 ### What happens after the merge
 
-Merging into this repository and appearing on subnsub.com are two steps:
+Merging into this repository and appearing on subnsub.com are separate
+steps:
 
 1. **Merge** — your module lands here under AGPL-3.0, credited to your
    GitHub account (we merge preserving you as the commit author).
@@ -111,10 +112,11 @@ Merging into this repository and appearing on subnsub.com are two steps:
 3. **Launch** — the tool appears in the Community tab with a credit line:
    *by \<your GitHub username\>* linking back to its directory in this repo.
 
-A merge is a commitment to launch, but not a same-day one — integration
-usually takes days, not months. If site-side constraints force any change to
-the logic itself, it happens as a visible PR against your module here, not
-as a silent divergence.
+A merged tool is expected to launch once integration and final checks are
+done — usually days, not months, though a late-stage security or legal snag
+can still stop one. If site-side constraints force any change to the logic
+itself, it happens as a visible PR against your module here, not as a
+silent divergence.
 
 ## Licensing
 
