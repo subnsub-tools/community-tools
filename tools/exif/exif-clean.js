@@ -565,10 +565,13 @@ function rewriteIprp(u8, b, removeIds) {
   });
   return box('iprp', concat(parts));
 }
-/* HEVC-coded HEIF brands ONLY, not generic mif1/miaf — AVIF and other
-   non-HEVC HEIF-family files also carry those, and we must not relabel an
-   AVIF as .heic (its bytes aren't HEVC). */
-const HEIF_BRANDS = { heic: 1, heix: 1, heim: 1, heis: 1, hevc: 1, hevx: 1, hevm: 1, hevs: 1, msf1: 1 };
+/* Single HEVC STILL-image brands ONLY (heic, or heix for 10-bit/HDR). Not
+   generic mif1/miaf (AVIF carries those too), and not the sequence brands
+   hevc/hevx/hevm/hevs/msf1 — those are track/moov-based moving images whose
+   sample offsets (stco/co64) this item-only strip does not re-base, and msf1
+   is also what AVIF image sequences list. The compat-brand scan still catches
+   mif1-major files that list heic. */
+const HEIF_BRANDS = { heic: 1, heix: 1 };
 function isHeif(u8) {
   if (u8.length < 16 || !hasAscii(u8, 4, 'ftyp')) return false;
   const size = u32be(u8, 0);
@@ -592,9 +595,9 @@ function analyzeHeic(u8) {
   if (!isHeif(u8)) return undefined;
   const tops = topBoxes(u8);
   if (!tops) return null;
-  let metaBox = null;
+  let metaBox = null, hasMoov = false;
   const mdats = [];
-  tops.forEach((b) => { if (b.type === 'meta' && !metaBox) metaBox = b; else if (b.type === 'mdat') mdats.push(b); });
+  tops.forEach((b) => { if (b.type === 'meta' && !metaBox) metaBox = b; else if (b.type === 'mdat') mdats.push(b); else if (b.type === 'moov') hasMoov = true; });
   if (!metaBox) return null;
   const metaChildren = childBoxes(u8, metaBox.start + metaBox.hdr + 4, metaBox.end);
   if (!metaChildren) return null;
@@ -615,6 +618,10 @@ function analyzeHeic(u8) {
   if (!removeList.length) {
     return { kind: 'heic', ext, mime, strips: [], tiff: null, orientNote: false, rebuild() { return [u8.slice()]; } };
   }
+  /* a moov box = a track / image-sequence structure whose stco/co64 sample
+     offsets we do NOT re-base — stripping items shifts mdat and would break the
+     tracks. Fail closed (a single still image has no moov). */
+  if (hasMoov) return { heicUnsupported: true };
   /* there IS metadata to strip — the iloc layout must be one we can losslessly
      re-base, else fail closed as unsupported (never as "corrupted"). */
   if (u8[ilocBox.start + ilocBox.hdr] > 1) return { heicUnsupported: true };
@@ -626,7 +633,7 @@ function analyzeHeic(u8) {
      — a verbatim copy would leave dangling refs to a removed item. Surface it up
      front as unsupported rather than fail on the rebuild. */
   if (irefBox && !parseIref(u8, irefBox)) return { heicUnsupported: true };
-  let ipmaBad = false;
+  let ipmaBad = false, refBad = false;
   metaChildren.forEach((mb) => {
     if (mb.type === 'ipma') { if (!parseIpma(u8, mb)) ipmaBad = true; }
     else if (mb.type === 'iprp') {
@@ -634,8 +641,14 @@ function analyzeHeic(u8) {
       if (!kids) { ipmaBad = true; }
       else kids.forEach((k) => { if (k.type === 'ipma' && !parseIpma(u8, k)) ipmaBad = true; });
     }
+    else if (mb.type === 'grpl') { refBad = true; }   /* entity groups can reference items; we don't rewrite them */
+    else if (mb.type === 'pitm') {                     /* the primary item must not be one we're removing */
+      const pv = u8[mb.start + mb.hdr];
+      const pid = pv === 0 ? u16be(u8, mb.start + mb.hdr + 4) : u32be(u8, mb.start + mb.hdr + 4);
+      if (removeIds[pid]) refBad = true;
+    }
   });
-  if (ipmaBad) return { heicUnsupported: true };
+  if (ipmaBad || refBad) return { heicUnsupported: true };
   const inMdat = (absStart, len) => {
     for (let m = 0; m < mdats.length; m++) { const d0 = mdats[m].start + mdats[m].hdr, d1 = mdats[m].end; if (absStart >= d0 && absStart + len <= d1) return true; }
     return false;
