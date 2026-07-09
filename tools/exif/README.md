@@ -17,7 +17,8 @@ claim is auditable.
 import { analyze } from './exif-clean.js';
 
 const report = analyze(new Uint8Array(await file.arrayBuffer()));
-// undefined → not JPEG/PNG/WebP;  null → recognised but corrupted
+// undefined → not JPEG/PNG/WebP/HEIC;  null → recognised but corrupted;
+// { heicUnsupported:true } → valid HEIC whose layout can't be losslessly stripped
 report.strips;      // [{ label, id?, size }] — every block that will be dropped
 report.tiff;        // privacy preview: { make, model, software, dt, dto, gps, orientation }
 const cleaned = new Blob(report.rebuild(), { type: report.mime });
@@ -35,5 +36,13 @@ const cleaned = new Blob(report.rebuild(), { type: report.mime });
 - PNG: drops text/time/eXIf and unknown ancillary chunks; keeps critical
   chunks and the technical whitelist (ICC, gamma, APNG animation).
 - WebP: drops EXIF/XMP chunks and clears the matching VP8X header flags.
+- HEIC/HEIF (iPhone photos): removes the Exif and XMP **items** — their
+  `iinf`/`infe`, `iloc`, `iref` and `iprp`/`ipma` records and their `mdat`
+  payload — then re-bases every surviving `iloc` offset, so the coded
+  image is copied byte-for-byte (ISOBMFF box surgery, no HEVC decode). A
+  post-write self-check re-reads each surviving item and fails closed if a
+  single byte moved. Exotic layouts (construction_method ≠ 0, `iloc` v2,
+  a payload outside `mdat`) return `{ heicUnsupported:true }` rather than
+  risk a corrupt file — re-encode those with Image Convert instead.
 - Truncated PNG/WebP files are rejected (fail closed) rather than
   "cleaned" into a file that silently lost data.

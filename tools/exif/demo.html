@@ -10,10 +10,10 @@
 </style>
 
 <h1>EXIF Cleaner — demo</h1>
-<p>Byte-level metadata strip for JPEG / PNG / WebP — pixels are copied
+<p>Byte-level metadata strip for JPEG / PNG / WebP / HEIC — pixels are copied
 verbatim, never re-encoded. Everything runs locally.</p>
 
-<input type="file" id="file" accept=".jpg,.jpeg,.png,.webp">
+<input type="file" id="file" accept=".jpg,.jpeg,.png,.webp,.heic,.heif">
 <div id="report"></div>
 <button id="run" hidden>Clean &amp; download</button>
 <p id="status"></p>
@@ -35,7 +35,8 @@ verbatim, never re-encoded. Everything runs locally.</p>
     const bytes = new Uint8Array(await f.arrayBuffer());
     if (seq !== pickSeq) return;
     const report = analyze(bytes);
-    if (report === undefined) { $('status').textContent = 'Only JPEG, PNG and WebP are supported.'; return; }
+    if (report === undefined) { $('status').textContent = 'Only JPEG, PNG, WebP and HEIC are supported.'; return; }
+    if (report && report.heicUnsupported) { $('status').textContent = 'This HEIC uses a layout that can’t be stripped losslessly — re-encode it with Image Convert instead.'; return; }
     if (!report) { $('status').textContent = 'Could not parse this file — it may be corrupted.'; return; }
     picked = { name: f.name, report };
     const t = report.tiff;

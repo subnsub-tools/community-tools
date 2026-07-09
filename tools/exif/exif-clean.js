@@ -343,9 +343,484 @@ function analyzeWebp(u8) {
   };
 }
 
+/* ---- HEIC / HEIF — lossless in-place EXIF/XMP strip via ISOBMFF box surgery.
+   The Exif and XMP items (declaration + payload) are removed and every
+   surviving iloc offset re-based, so the coded image (hvc1/grid/tile
+   bitstreams) is copied byte-for-byte and the output is a valid HEIC that
+   decodes to identical pixels. Fails closed (→ { heicUnsupported:true }) on
+   layouts we can't re-base without a re-encode: construction_method ≠ 0, iloc
+   v2 / extent index, size nibbles outside {0,4,8}, or a metadata payload that
+   isn't inside an mdat. ---- */
+function u16be(u8, p) { return (u8[p] << 8) | u8[p + 1]; }
+function readN(u8, p, n) { let v = 0; for (let i = 0; i < n; i++) v = v * 256 + u8[p + i]; return v; }
+function str4(u8, p) { return String.fromCharCode(u8[p], u8[p + 1], u8[p + 2], u8[p + 3]); }
+function writeN(arr, p, n, v) { for (let i = n - 1; i >= 0; i--) { arr[p + i] = v & 0xFF; v = Math.floor(v / 256); } }
+function concat(parts) {
+  let total = 0;
+  for (let i = 0; i < parts.length; i++) total += parts[i].length;
+  const out = new Uint8Array(total);
+  let w = 0;
+  for (let i = 0; i < parts.length; i++) { out.set(parts[i], w); w += parts[i].length; }
+  return out;
+}
+function box(type, payload) {
+  const out = new Uint8Array(8 + payload.length);
+  writeN(out, 0, 4, 8 + payload.length);
+  out[4] = type.charCodeAt(0); out[5] = type.charCodeAt(1); out[6] = type.charCodeAt(2); out[7] = type.charCodeAt(3);
+  out.set(payload, 8);
+  return out;
+}
+function topBoxes(u8) {
+  const boxes = [];
+  let p = 0;
+  const n = u8.length;
+  while (p + 8 <= n) {
+    let size = u32be(u8, p), hdr = 8;
+    if (size === 1) { if (p + 16 > n) return null; size = u32be(u8, p + 8) * 4294967296 + u32be(u8, p + 12); hdr = 16; }
+    else if (size === 0) { size = n - p; }
+    if (size < hdr || p + size > n) return null;
+    boxes.push({ type: str4(u8, p + 4), start: p, end: p + size, hdr });
+    p += size;
+  }
+  return (p === n) ? boxes : null;   /* trailing garbage / truncation → fail closed */
+}
+function childBoxes(u8, start, end) {
+  const boxes = [];
+  let p = start;
+  while (p + 8 <= end) {
+    let size = u32be(u8, p), hdr = 8;
+    if (size === 1) { if (p + 16 > end) return null; size = u32be(u8, p + 8) * 4294967296 + u32be(u8, p + 12); hdr = 16; }
+    else if (size === 0) { size = end - p; }
+    if (size < hdr || p + size > end) return null;
+    boxes.push({ type: str4(u8, p + 4), start: p, end: p + size, hdr });
+    p += size;
+  }
+  return (p === end) ? boxes : null;
+}
+function parseIloc(u8, b) {
+  let q = b.start + b.hdr;
+  const ver = u8[q]; q += 4;                       /* version + flags */
+  if (ver > 1) return null;                         /* v2 = idat/item index → unsupported */
+  const b0 = u8[q], b1 = u8[q + 1]; q += 2;
+  const offSize = b0 >> 4, lenSize = b0 & 0xF, baseSize = b1 >> 4, idxSize = b1 & 0xF;
+  if (idxSize !== 0) return null;
+  /* offset & length must be real widths — a 0-width extent lets a hostile iloc
+     declare 65535 zero-byte extents per item and spin the parser (DoS). A
+     base_offset of 0 (absent) is fine and common. */
+  if ((offSize !== 4 && offSize !== 8) || (lenSize !== 4 && lenSize !== 8)) return null;
+  if (baseSize !== 0 && baseSize !== 4 && baseSize !== 8) return null;
+  const cnt = u16be(u8, q); q += 2;
+  if (cnt > b.end - q) return null;                 /* each item ≥ 6 bytes */
+  const items = [];
+  for (let i = 0; i < cnt; i++) {
+    if (q + 2 + (ver === 1 ? 2 : 0) + 2 + baseSize + 2 > b.end) return null;
+    const id = u16be(u8, q); q += 2;
+    let cm = 0;
+    if (ver === 1) { cm = u16be(u8, q) & 0xF; q += 2; }
+    const dataRef = u16be(u8, q); q += 2;
+    const base = readN(u8, q, baseSize); q += baseSize;
+    const extCnt = u16be(u8, q); q += 2;
+    if (q + extCnt * (offSize + lenSize) > b.end) return null;   /* extents must fit the box */
+    const exts = [];
+    for (let e = 0; e < extCnt; e++) {
+      const off = readN(u8, q, offSize); q += offSize;
+      const len = readN(u8, q, lenSize); q += lenSize;
+      exts.push({ off, len });
+    }
+    items.push({ id, cm, dataRef, base, exts });
+  }
+  if (q !== b.end) return null;
+  return { ver, offSize, lenSize, baseSize, items };
+}
+function buildIloc(il) {
+  const parts = [];
+  const head = new Uint8Array(8);
+  head[0] = il.ver;
+  head[4] = (il.offSize << 4) | il.lenSize;
+  head[5] = (il.baseSize << 4);
+  writeN(head, 6, 2, il.items.length);
+  parts.push(head);
+  il.items.forEach((it) => {
+    const per = 2 + (il.ver === 1 ? 2 : 0) + 2 + il.baseSize + 2 + it.exts.length * (il.offSize + il.lenSize);
+    const a = new Uint8Array(per);
+    let w = 0;
+    writeN(a, w, 2, it.id); w += 2;
+    if (il.ver === 1) { writeN(a, w, 2, it.cm & 0xF); w += 2; }
+    writeN(a, w, 2, it.dataRef); w += 2;
+    writeN(a, w, il.baseSize, it.base); w += il.baseSize;
+    writeN(a, w, 2, it.exts.length); w += 2;
+    it.exts.forEach((x) => { writeN(a, w, il.offSize, x.off); w += il.offSize; writeN(a, w, il.lenSize, x.len); w += il.lenSize; });
+    parts.push(a);
+  });
+  return box('iloc', concat(parts));
+}
+function parseIinf(u8, b) {
+  const ver = u8[b.start + b.hdr];
+  let q = b.start + b.hdr + 4, cnt;
+  if (ver === 0) { cnt = u16be(u8, q); q += 2; } else { cnt = u32be(u8, q); q += 4; }
+  const infes = childBoxes(u8, q, b.end);
+  if (!infes) return null;
+  const map = {};
+  infes.forEach((ib) => {
+    if (ib.type !== 'infe') return;
+    const v = u8[ib.start + ib.hdr];
+    let p = ib.start + ib.hdr + 4, id, type4 = '', content = '';
+    if (v >= 2) {
+      if (v === 2) { id = u16be(u8, p); p += 2; } else { id = u32be(u8, p); p += 4; }
+      p += 2;                                        /* protection index */
+      type4 = str4(u8, p); p += 4;
+      while (p < ib.end && u8[p]) p++;                /* item_name */
+      p++;
+      if (type4 === 'mime') { let s = ''; while (p < ib.end && u8[p]) { s += String.fromCharCode(u8[p]); p++; } content = s; }
+      map[id] = { type: type4, content };
+    }
+  });
+  return { ver, cnt, infes, map };
+}
+function parseIref(u8, b) {
+  const v = u8[b.start + b.hdr];
+  const refs = childBoxes(u8, b.start + b.hdr + 4, b.end);
+  if (!refs) return null;
+  const idW = v === 0 ? 2 : 4;
+  const out = [];
+  let bad = false;
+  refs.forEach((rb) => {
+    if (bad) return;
+    let p = rb.start + rb.hdr;
+    if (p + idW + 2 > rb.end) { bad = true; return; }
+    const from = readN(u8, p, idW); p += idW;
+    const rc = u16be(u8, p); p += 2;
+    if (p + rc * idW > rb.end) { bad = true; return; }   /* to-list must fit the ref box */
+    const tos = [];
+    for (let i = 0; i < rc; i++) { tos.push(readN(u8, p, idW)); p += idW; }
+    out.push({ type: rb.type, from, tos });
+  });
+  if (bad) return null;
+  return { ver: v, idW, refs: out };
+}
+function buildIref(ir) {
+  if (!ir.refs.length) return null;
+  const parts = [new Uint8Array([ir.ver, 0, 0, 0])];
+  ir.refs.forEach((r) => {
+    const a = new Uint8Array(ir.idW + 2 + r.tos.length * ir.idW);
+    let w = 0;
+    writeN(a, w, ir.idW, r.from); w += ir.idW;
+    writeN(a, w, 2, r.tos.length); w += 2;
+    r.tos.forEach((t) => { writeN(a, w, ir.idW, t); w += ir.idW; });
+    parts.push(box(r.type, a));
+  });
+  return box('iref', concat(parts));
+}
+function parseIpma(u8, b) {
+  const ver = u8[b.start + b.hdr];
+  const flags = (u8[b.start + b.hdr + 1] << 16) | (u8[b.start + b.hdr + 2] << 8) | u8[b.start + b.hdr + 3];
+  let q = b.start + b.hdr + 4;
+  const cnt = u32be(u8, q); q += 4;
+  if (cnt > b.end - q) return null;                 /* each entry ≥ idW+1 ≥ 3 bytes */
+  const idW = ver < 1 ? 2 : 4, assocW = (flags & 1) ? 2 : 1;
+  const entries = [];
+  for (let i = 0; i < cnt; i++) {
+    if (q + idW + 1 > b.end) return null;
+    const id = readN(u8, q, idW); q += idW;
+    const ac = u8[q]; q += 1;
+    if (q + ac * assocW > b.end) return null;
+    const assoc = [];
+    for (let a = 0; a < ac; a++) { assoc.push(readN(u8, q, assocW)); q += assocW; }
+    entries.push({ id, assoc });
+  }
+  if (q !== b.end) return null;
+  return { ver, flags, idW, assocW, entries };
+}
+function buildIpma(ip) {
+  const parts = [];
+  const head = new Uint8Array(8);
+  head[0] = ip.ver; head[1] = (ip.flags >> 16) & 0xFF; head[2] = (ip.flags >> 8) & 0xFF; head[3] = ip.flags & 0xFF;
+  writeN(head, 4, 4, ip.entries.length);
+  parts.push(head);
+  ip.entries.forEach((en) => {
+    const a = new Uint8Array(ip.idW + 1 + en.assoc.length * ip.assocW);
+    let w = 0;
+    writeN(a, w, ip.idW, en.id); w += ip.idW;
+    a[w] = en.assoc.length; w += 1;
+    en.assoc.forEach((v) => { writeN(a, w, ip.assocW, v); w += ip.assocW; });
+    parts.push(a);
+  });
+  return box('ipma', concat(parts));
+}
+/* ipma normally lives INSIDE iprp (iprp = { ipco, ipma }), not as a direct
+   meta child — drop associations for removed items wherever it appears. */
+function rewriteIpmaBytes(u8, b, removeIds) {
+  const ip = parseIpma(u8, b);
+  if (!ip) throw new Error('heic-ipma');   /* fail closed: a verbatim copy keeps associations for removed items */
+  ip.entries = ip.entries.filter((en) => !removeIds[en.id]);
+  return buildIpma(ip);
+}
+function rewriteIprp(u8, b, removeIds) {
+  const kids = childBoxes(u8, b.start + b.hdr, b.end);   /* iprp is a plain container, no version/flags */
+  if (!kids) throw new Error('heic-iprp');
+  const parts = [];
+  kids.forEach((k) => {
+    if (k.type === 'ipma') parts.push(rewriteIpmaBytes(u8, k, removeIds));
+    else parts.push(u8.subarray(k.start, k.end));         /* ipco (image props) verbatim */
+  });
+  return box('iprp', concat(parts));
+}
+/* HEVC-coded HEIF brands ONLY, not generic mif1/miaf — AVIF and other
+   non-HEVC HEIF-family files also carry those, and we must not relabel an
+   AVIF as .heic (its bytes aren't HEVC). */
+const HEIF_BRANDS = { heic: 1, heix: 1, heim: 1, heis: 1, hevc: 1, hevx: 1, hevm: 1, hevs: 1, msf1: 1 };
+function isHeif(u8) {
+  if (u8.length < 16 || !hasAscii(u8, 4, 'ftyp')) return false;
+  const size = u32be(u8, 0);
+  if (size < 16 || size > u8.length) return false;
+  if (HEIF_BRANDS[str4(u8, 8)]) return true;             /* major brand */
+  for (let p = 16; p + 4 <= size; p += 4) { if (HEIF_BRANDS[str4(u8, p)]) return true; }
+  return false;
+}
+/* HEIC Exif item payload begins with a 4-byte big-endian tiff_header_offset;
+   some writers prefix "Exif\0\0" or start at the TIFF header — tolerate all. */
+function exifTiffStart(u8, payStart, payEnd) {
+  if (payStart + 4 > payEnd) return -1;
+  if (u8[payStart] === 0x4D && u8[payStart + 1] === 0x4D) return payStart;             /* "MM" */
+  if (u8[payStart] === 0x49 && u8[payStart + 1] === 0x49) return payStart;             /* "II" */
+  if (hasAscii(u8, payStart, 'Exif') && u8[payStart + 4] === 0 && u8[payStart + 5] === 0) return payStart + 6;
+  const hoff = u32be(u8, payStart);
+  const t = payStart + 4 + hoff;
+  return (t >= payStart && t + 4 <= payEnd) ? t : -1;
+}
+function analyzeHeic(u8) {
+  if (!isHeif(u8)) return undefined;
+  const tops = topBoxes(u8);
+  if (!tops) return null;
+  let metaBox = null;
+  const mdats = [];
+  tops.forEach((b) => { if (b.type === 'meta' && !metaBox) metaBox = b; else if (b.type === 'mdat') mdats.push(b); });
+  if (!metaBox) return null;
+  const metaChildren = childBoxes(u8, metaBox.start + metaBox.hdr + 4, metaBox.end);
+  if (!metaChildren) return null;
+  let ilocBox = null, iinfBox = null, irefBox = null;
+  metaChildren.forEach((b) => { if (b.type === 'iloc') ilocBox = b; else if (b.type === 'iinf') iinfBox = b; else if (b.type === 'iref') irefBox = b; });
+  if (!ilocBox || !iinfBox) return null;
+  const iinf = parseIinf(u8, iinfBox);
+  if (!iinf) return null;
+  /* which items are metadata (Exif / XMP)? — knowable from iinf alone */
+  const removeIds = {}, removeList = [];
+  Object.keys(iinf.map).forEach((k) => {
+    const it = iinf.map[k], id = parseInt(k, 10);
+    const isExif = it.type === 'Exif' || it.type === 'exif';
+    const isXmp = it.type === 'mime' && /application\/rdf\+xml/i.test(it.content || '');
+    if (isExif || isXmp) { removeIds[id] = isExif ? 'exif' : 'xmp'; removeList.push(id); }
+  });
+  const ext = 'heic', mime = 'image/heic';
+  if (!removeList.length) {
+    return { kind: 'heic', ext, mime, strips: [], tiff: null, orientNote: false, rebuild() { return [u8.slice()]; } };
+  }
+  /* there IS metadata to strip — the iloc layout must be one we can losslessly
+     re-base, else fail closed as unsupported (never as "corrupted"). */
+  if (u8[ilocBox.start + ilocBox.hdr] > 1) return { heicUnsupported: true };
+  const iloc = parseIloc(u8, ilocBox);
+  if (!iloc) return { heicUnsupported: true };
+  const ilById = {};
+  for (let i = 0; i < iloc.items.length; i++) { const it = iloc.items[i]; if (it.cm !== 0) return { heicUnsupported: true }; ilById[it.id] = it; }
+  /* every box we must REWRITE to drop the item's references has to parse cleanly
+     — a verbatim copy would leave dangling refs to a removed item. Surface it up
+     front as unsupported rather than fail on the rebuild. */
+  if (irefBox && !parseIref(u8, irefBox)) return { heicUnsupported: true };
+  let ipmaBad = false;
+  metaChildren.forEach((mb) => {
+    if (mb.type === 'ipma') { if (!parseIpma(u8, mb)) ipmaBad = true; }
+    else if (mb.type === 'iprp') {
+      const kids = childBoxes(u8, mb.start + mb.hdr, mb.end);
+      if (!kids) { ipmaBad = true; }
+      else kids.forEach((k) => { if (k.type === 'ipma' && !parseIpma(u8, k)) ipmaBad = true; });
+    }
+  });
+  if (ipmaBad) return { heicUnsupported: true };
+  const inMdat = (absStart, len) => {
+    for (let m = 0; m < mdats.length; m++) { const d0 = mdats[m].start + mdats[m].hdr, d1 = mdats[m].end; if (absStart >= d0 && absStart + len <= d1) return true; }
+    return false;
+  };
+  const removedRanges = [], strips = [];
+  let tiff = null;
+  for (let r = 0; r < removeList.length; r++) {
+    const rid = removeList[r], rit = ilById[rid];
+    if (!rit) return { heicUnsupported: true };
+    let sizeSum = 0;
+    for (let e = 0; e < rit.exts.length; e++) {
+      const abs = rit.base + rit.exts[e].off, len = rit.exts[e].len;
+      if (!inMdat(abs, len)) return { heicUnsupported: true };
+      removedRanges.push({ start: abs, len });
+      sizeSum += len;
+      if (removeIds[rid] === 'exif' && !tiff && rit.exts.length === 1) {
+        const ts = exifTiffStart(u8, abs, abs + len);
+        if (ts >= 0) { const t = parseTiff(u8, ts, abs + len); if (t) tiff = t; }
+      }
+    }
+    strips.push({ label: removeIds[rid] === 'exif' ? 'EXIF metadata' : 'XMP metadata', size: sizeSum });
+  }
+  /* surviving items must not overlap any removed range (interleaving = unsupported) */
+  for (let si = 0; si < iloc.items.length; si++) {
+    const s = iloc.items[si];
+    if (removeIds[s.id]) continue;
+    for (let se = 0; se < s.exts.length; se++) {
+      const a0 = s.base + s.exts[se].off, a1 = a0 + s.exts[se].len;
+      for (let rr = 0; rr < removedRanges.length; rr++) {
+        const rs = removedRanges[rr].start, reEnd = rs + removedRanges[rr].len;
+        if (a0 < reEnd && rs < a1) return { heicUnsupported: true };
+      }
+    }
+  }
+  if (!iloc.items.filter((it) => !removeIds[it.id]).length) return { heicUnsupported: true };
+  return {
+    kind: 'heic', ext, mime, strips, tiff, orientNote: false,
+    rebuild() { return rebuildHeic(u8, tops, metaBox, metaChildren, mdats, iloc, iinf, irefBox, removeIds, removedRanges, ilById); },
+  };
+}
+function rebuildHeic(u8, tops, metaBox, metaChildren, mdats, iloc, iinf, irefBox, removeIds, removedRanges, ilById) {
+  const keptInfe = iinf.infes.filter((ib) => {
+    if (ib.type !== 'infe') return true;
+    const v = u8[ib.start + ib.hdr];
+    if (v < 2) return true;
+    const p = ib.start + ib.hdr + 4;
+    const id = v === 2 ? u16be(u8, p) : u32be(u8, p);
+    return !removeIds[id];
+  });
+  function buildIinf() {
+    const head = new Uint8Array(iinf.ver === 0 ? 6 : 8);
+    head[0] = iinf.ver;
+    const infeCount = keptInfe.filter((b) => b.type === 'infe').length;
+    if (iinf.ver === 0) writeN(head, 4, 2, infeCount); else writeN(head, 4, 4, infeCount);
+    const parts = [head];
+    keptInfe.forEach((b) => parts.push(u8.subarray(b.start, b.end)));
+    return box('iinf', concat(parts));
+  }
+  let newIref = null;
+  if (irefBox) {
+    const ir = parseIref(u8, irefBox);
+    if (ir) {
+      ir.refs = ir.refs.filter((rf) => !removeIds[rf.from])
+        .map((rf) => { rf.tos = rf.tos.filter((t) => !removeIds[t]); return rf; })
+        .filter((rf) => rf.tos.length > 0);
+      newIref = buildIref(ir);
+    } else { throw new Error('heic-iref'); }   /* fail closed: a verbatim iref keeps refs to removed items */
+  }
+  const survItems = iloc.items.filter((it) => !removeIds[it.id])
+    .map((it) => ({ id: it.id, cm: it.cm, dataRef: it.dataRef, base: it.base, exts: it.exts }));
+  const ilStruct = { ver: iloc.ver, offSize: iloc.offSize, lenSize: iloc.lenSize, baseSize: iloc.baseSize, items: survItems };
+  function assembleMeta() {
+    const parts = [u8.subarray(metaBox.start + metaBox.hdr, metaBox.start + metaBox.hdr + 4)];
+    metaChildren.forEach((b) => {
+      if (b.type === 'iloc') parts.push(buildIloc(ilStruct));
+      else if (b.type === 'iinf') parts.push(buildIinf());
+      else if (b.type === 'iref') { if (newIref) parts.push(newIref); }
+      else if (b.type === 'iprp') parts.push(rewriteIprp(u8, b, removeIds));   /* ipma lives in here */
+      else if (b.type === 'ipma') parts.push(rewriteIpmaBytes(u8, b, removeIds));
+      else parts.push(u8.subarray(b.start, b.end));
+    });
+    return box('meta', concat(parts));
+  }
+  const metaPass1 = assembleMeta();
+  const metaDelta = metaPass1.length - (metaBox.end - metaBox.start);   /* ≤ 0 */
+  removedRanges.sort((a, b) => a.start - b.start);
+  /* merge overlapping / adjacent ranges into a union — the mdat writer excises
+     the union, so removedBefore() must count the union too (double-counting an
+     overlap would over-shift every later offset). */
+  const mergedRanges = [];
+  removedRanges.forEach((r) => {
+    const last = mergedRanges[mergedRanges.length - 1];
+    if (last && r.start <= last.start + last.len) { last.len = Math.max(last.start + last.len, r.start + r.len) - last.start; }
+    else mergedRanges.push({ start: r.start, len: r.len });
+  });
+  removedRanges = mergedRanges;
+  const removedBefore = (O) => { let s = 0; for (let i = 0; i < removedRanges.length; i++) { if (removedRanges[i].start < O) s += removedRanges[i].len; } return s; };
+  /* Re-base BOTH base_offset and every extent offset so a removed range in the
+     gap [base, base+off) is counted, not just ranges before base. new_abs(O) =
+     O + metaDelta − removedBefore(O); only meta precedes mdat. When baseSize is
+     0 the anchor is the extent offset itself (base stays 0). */
+  const metaEnd = metaBox.end;
+  let bad = false;
+  survItems.forEach((it) => {
+    const newBase = ilStruct.baseSize > 0 ? (it.base + metaDelta - removedBefore(it.base)) : 0;
+    if (ilStruct.baseSize > 0 && it.base < metaEnd) bad = true;
+    it.exts = it.exts.map((x) => {
+      const oldAbs = it.base + x.off;
+      if (oldAbs < metaEnd) bad = true;
+      const newAbs = oldAbs + metaDelta - removedBefore(oldAbs);
+      return { off: newAbs - newBase, len: x.len };
+    });
+    it.base = newBase;
+  });
+  if (bad) throw new Error('heic-layout');
+  const metaFinal = assembleMeta();
+  if (metaFinal.length !== metaPass1.length) throw new Error('heic-meta-size');
+  const outParts = [];
+  tops.forEach((b) => {
+    if (b === metaBox) { outParts.push(metaFinal); return; }
+    if (b.type === 'mdat') {
+      const d0 = b.start + b.hdr, d1 = b.end;
+      const inside = removedRanges.filter((x) => x.start >= d0 && x.start + x.len <= d1).sort((a, c) => a.start - c.start);
+      if (!inside.length) { outParts.push(u8.subarray(b.start, b.end)); return; }
+      const payloadParts = [];
+      let cur = d0;
+      inside.forEach((x) => { if (x.start > cur) payloadParts.push(u8.subarray(cur, x.start)); cur = x.start + x.len; });
+      if (cur < d1) payloadParts.push(u8.subarray(cur, d1));
+      const payload = concat(payloadParts);
+      /* PRESERVE the original header width — downgrading a 16-byte largesize
+         header to 8 bytes would move this mdat's payload 8 bytes earlier, a
+         shift the offset re-basing (metaDelta only) doesn't account for.
+         Payload only shrinks, so an 8-byte header never needs to grow. */
+      let hdr;
+      if (b.hdr === 16) {
+        hdr = new Uint8Array(16); writeN(hdr, 0, 4, 1);
+        hdr[4] = 0x6D; hdr[5] = 0x64; hdr[6] = 0x61; hdr[7] = 0x74;
+        writeN(hdr, 8, 8, 16 + payload.length);
+      } else {
+        hdr = new Uint8Array(8); writeN(hdr, 0, 4, 8 + payload.length);
+        hdr[4] = 0x6D; hdr[5] = 0x64; hdr[6] = 0x61; hdr[7] = 0x74;
+      }
+      outParts.push(hdr); outParts.push(payload);
+      return;
+    }
+    outParts.push(u8.subarray(b.start, b.end));
+  });
+  const out = concat(outParts);
+  /* self-check: re-parse the output and confirm every surviving item's bytes
+     are byte-identical to the input. Any offset slip throws here, before the
+     caller can ship a corrupt file. */
+  verifyHeic(u8, out, removeIds, ilById);
+  return [out];
+}
+function verifyHeic(orig, out, removeIds, origById) {
+  const tops = topBoxes(out);
+  if (!tops) throw new Error('heic-verify-parse');
+  let metaBox = null;
+  tops.forEach((b) => { if (b.type === 'meta' && !metaBox) metaBox = b; });
+  if (!metaBox) throw new Error('heic-verify-meta');
+  const mc = childBoxes(out, metaBox.start + metaBox.hdr + 4, metaBox.end);
+  if (!mc) throw new Error('heic-verify-metac');
+  let ilocBox = null;
+  mc.forEach((b) => { if (b.type === 'iloc') ilocBox = b; });
+  if (!ilocBox) throw new Error('heic-verify-iloc');
+  const nIloc = parseIloc(out, ilocBox);
+  if (!nIloc) throw new Error('heic-verify-ilocparse');
+  nIloc.items.forEach((it) => {
+    if (removeIds[it.id]) throw new Error('heic-verify-leftover');
+    const oit = origById[it.id];
+    if (!oit) return;
+    if (it.exts.length !== oit.exts.length) throw new Error('heic-verify-extcount');
+    for (let e = 0; e < it.exts.length; e++) {
+      const nAbs = it.base + it.exts[e].off, oAbs = oit.base + oit.exts[e].off, len = it.exts[e].len;
+      if (len !== oit.exts[e].len) throw new Error('heic-verify-len');
+      if (nAbs + len > out.length || oAbs + len > orig.length) throw new Error('heic-verify-bounds');
+      for (let k = 0; k < len; k++) { if (out[nAbs + k] !== orig[oAbs + k]) throw new Error('heic-verify-bytes'); }
+    }
+  });
+}
+
 /* Analyse an image buffer.
      undefined → not a format this tool does
      null      → recognised but unparseable (corrupted / truncated)
+     { heicUnsupported:true } → valid HEIC whose layout can't be losslessly stripped
      report    → { kind, ext, mime, strips, tiff, orientNote, rebuild }
    strips lists every block the rebuild will drop ({ label, id?, size });
    tiff is the privacy preview (camera, dates, software, GPS in decimal
@@ -356,5 +831,6 @@ export function analyze(bytes) {
   if (u8.length >= 4 && u8[0] === 0xFF && u8[1] === 0xD8) return analyzeJpeg(u8);
   if (u8.length >= 20 && u8[0] === 0x89 && u8[1] === 0x50) return analyzePng(u8);
   if (u8.length >= 20 && hasAscii(u8, 0, 'RIFF')) return analyzeWebp(u8);
+  if (u8.length >= 16 && hasAscii(u8, 4, 'ftyp')) { const h = analyzeHeic(u8); if (h !== undefined) return h; }
   return undefined;
 }
