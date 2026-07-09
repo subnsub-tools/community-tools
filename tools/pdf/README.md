@@ -1,7 +1,8 @@
 # PDF Tools
 
-Merge PDFs, extract a page range, or turn photos into a PDF — right in the
-browser, files never leave the device. This is the core logic of the
+Merge PDFs, extract a page range, turn photos into a PDF, or annotate a
+document with text, highlights and freehand pen — right in the browser, files
+never leave the device. This is the core logic of the
 [PDF Tools tool on subnsub.com](https://subnsub.com).
 
 ## Files
@@ -16,12 +17,24 @@ in (the site vendors `pdf-lib.min.js` and lazy-loads it on first use; the
 demo pulls the same official build from a CDN):
 
 ```js
-import { mergePdfs, extractPages, imagesToPdf, parseRanges } from './pdf-tools.js';
+import { mergePdfs, extractPages, imagesToPdf, annotatePdf, parseRanges } from './pdf-tools.js';
 
 const merged = await mergePdfs(window.PDFLib, [{ bytes, name }, ...]);
 const picked = await extractPages(window.PDFLib, bytes, name, '1-3, 7, 12-');
 const album  = await imagesToPdf(window.PDFLib, images, { pageSize: 'orig' });
 // each → { bytes: Uint8Array, pages: number }
+
+// Annotate — burn text / highlight / pen marks into a copy. Marks are in
+// render pixels; pass pdf.js `viewport.convertToPdfPoint` per page so rotated
+// pages map correctly (the site renders with pdf.js; here the caller supplies
+// the render geometry). → { bytes: Uint8Array, skipped: number }
+const marked = await annotatePdf(window.PDFLib, bytes, [
+  { scale, toPdfPoint: (x, y) => viewport.convertToPdfPoint(x, y), annos: [
+    { type: 'text', x: 70, y: 90, text: 'REVIEWED', color: '#e5484d', size: 16 },
+    { type: 'highlight', x: 40, y: 52, w: 210, h: 26, color: '#ffd21e' },
+    { type: 'pen', width: 3, color: '#3b82f6', pts: [{ x: 60, y: 150 }, { x: 120, y: 170 }] },
+  ] },
+]);
 ```
 
 Error codes on thrown errors: `encrypted`, `parse` (carry `fileName`),

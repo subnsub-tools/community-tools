@@ -336,3 +336,50 @@ export async function imagesToPdf(PDFLib, inputs, { pageSize = 'orig', decodeHei
   }
   return { bytes: await outDoc.save(), pages: inputs.length };
 }
+
+/* Burn Annotate-mode marks into a fresh PDF. Each `pages[i]` is
+   { scale, annos, toPdfPoint? } where `scale` is the render scale used to
+   rasterise that page (site build: pdf.js) and `annos` are marks in RENDER
+   pixels, top-left origin:
+     { type:'text',      x, y, text, color, size }   // size in render px
+     { type:'highlight', x, y, w, h, color }
+     { type:'pen',       width, color, pts:[{x,y}, …] }
+   `color` is a #rrggbb string. Optional `toPdfPoint(x,y) -> [px,py]` maps a
+   render pixel to a PDF point — pass pdf.js `viewport.convertToPdfPoint` so
+   rotation and a non-zero MediaBox/CropBox origin are respected (the site
+   does); without it, a plain scale + y-flip is used, correct for upright
+   zero-origin pages. Returns `{ bytes, skipped }` — `skipped` counts text
+   notes Helvetica couldn't encode (e.g. CJK), which are dropped rather than
+   failing the batch. The page render itself is a UI concern left to the
+   caller, so this stays pure pdf-lib and framework-free. */
+export async function annotatePdf(PDFLib, bytes, pages) {
+  const { rgb, StandardFonts } = PDFLib;
+  const hexRgb = h => { const n = parseInt(h.slice(1), 16); return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255); };
+  const out = await loadDoc(PDFLib, bytes, 'annotate');
+  const font = await out.embedFont(StandardFonts.Helvetica);
+  const outPages = out.getPages();
+  let skipped = 0;
+  (pages || []).forEach((pg, i) => {
+    const page = outPages[i];
+    if (!page || !pg) return;
+    const S = pg.scale, hPt = page.getHeight();
+    const toPt = pg.toPdfPoint
+      ? (x, y) => { const q = pg.toPdfPoint(x, y); return { x: q[0], y: q[1] }; }
+      : (x, y) => ({ x: x / S, y: hPt - y / S });
+    (pg.annos || []).forEach(a => {
+      const col = hexRgb(a.color);
+      if (a.type === 'highlight') {
+        const c1 = toPt(a.x, a.y), c2 = toPt(a.x + a.w, a.y + a.h);
+        page.drawRectangle({ x: Math.min(c1.x, c2.x), y: Math.min(c1.y, c2.y), width: Math.abs(c2.x - c1.x), height: Math.abs(c2.y - c1.y), color: col, opacity: 0.32 });
+      } else if (a.type === 'pen') {
+        if (a.pts.length === 1) { const d = toPt(a.pts[0].x, a.pts[0].y); page.drawCircle({ x: d.x, y: d.y, size: Math.max(0.6, a.width / S / 2), color: col }); }
+        else for (let k = 1; k < a.pts.length; k++) page.drawLine({ start: toPt(a.pts[k-1].x, a.pts[k-1].y), end: toPt(a.pts[k].x, a.pts[k].y), thickness: a.width / S, color: col });
+      } else if (a.type === 'text') {
+        const b = toPt(a.x, a.y + a.size * 0.8);   /* canvas top-baseline → pdf-lib baseline */
+        try { page.drawText(String(a.text), { x: b.x, y: b.y, size: a.size / S, font, color: col }); }
+        catch (_) { skipped++; }
+      }
+    });
+  });
+  return { bytes: await out.save(), skipped };
+}
