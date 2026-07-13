@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Doc to Markdown — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin: .75rem 0; }
+  textarea { width: 100%; min-height: 18rem; font: 12px/1.5 ui-monospace, monospace; }
+  .err { color: #b00020; }
+</style>
+
+<h1>Doc to Markdown — demo</h1>
+<p>Convert DOCX, XLSX/XLS/ODS, PPTX, EPUB, HTML, CSV/TSV, JSON, XML, TXT or a
+ZIP of them into Markdown — all in browser memory, nothing is uploaded.
+mammoth and SheetJS load from CDNs with SRI pins; PDF is supported on the
+site build (pdf.js is an ES module, which script-tag SRI can't pin, so this
+demo omits it).</p>
+
+<label>File <input type="file" id="file"></label>
+<button id="run">Convert</button>
+<p id="status"></p>
+<textarea id="out" readonly placeholder="Markdown appears here"></textarea>
+
+<!-- library code only — your files still never leave the page -->
+<script src="https://unpkg.com/mammoth@1.11.0/mammoth.browser.min.js"
+        integrity="sha384-t9eMqh3OtJXZhvLtmol8r2+23t6vg1GDo1UeyP55BEQdCI67GW2u8Nso+Yzo5m9r"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
+        integrity="sha384-EnyY0/GSHQGSxSgMwaIPzSESbqoOLSexfnSMN2AP+39Ckmn92stwABZynq1JyzdT"
+        crossorigin="anonymous"></script>
+<script type="module">
+  import { convertDocument, extOf } from './doc2md.js';
+
+  const $ = (id) => document.getElementById(id);
+  const status = (m, e) => { $('status').textContent = m; $('status').className = e ? 'err' : ''; };
+
+  $('run').onclick = async () => {
+    const f = $('file').files[0];
+    if (!f) return status('Pick a file first.', true);
+    status('Working…');
+    $('out').value = '';
+    try {
+      const u8 = new Uint8Array(await f.arrayBuffer());
+      const r = await convertDocument(u8, extOf(f.name), f.name, {
+        mammoth: window.mammoth,
+        XLSX: window.XLSX,
+        /* pdfjs omitted — see note above */
+      });
+      $('out').value = r.md;
+      status(r.warns.length ? r.warns.join(' · ') : 'Done — ' + r.md.length + ' chars.');
+    } catch (e) {
+      status('Failed: ' + (e && e.code ? e.code : e), true);
+    }
+  };
+</script>
