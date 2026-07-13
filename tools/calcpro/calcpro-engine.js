@@ -52,8 +52,11 @@
 
   function ratToNumber(n, d) {
     var neg = (n < 0n); if (neg) n = -n;
-    var s = Math.max(0, Math.max(bitLen(n), bitLen(d)) - 60);
-    var r = Number(n >> BigInt(s)) / Number(d >> BigInt(s));
+    /* normalise numerator and denominator SEPARATELY — one shared shift
+       zeroes whichever side is small (1n >> 5n === 0n) and turned finite
+       values like sqrt(2^64+1) into ∞. Compensate with the exponent gap. */
+    var sn = Math.max(0, bitLen(n) - 60), sd = Math.max(0, bitLen(d) - 60);
+    var r = (Number(n >> BigInt(sn)) / Number(d >> BigInt(sd))) * Math.pow(2, sn - sd);
     return neg ? -r : r;
   }
   function toF(x) {
@@ -415,18 +418,27 @@
       c = src[i];
       if (c === ' ' || c === '\t' || c === '\n' || c === ' ') { i++; continue; }
       if (isDigit(c) || (c === '.' && isDigit(src[i + 1]))) {
+        /* a base literal followed by a digit that its base can't contain
+           (0b102, 0o78, 0x1F.5) must be an error, not a silent implicit
+           multiplication that "answers" the typo */
+        var badTail = function (j) {
+          if (j < n && /[0-9.]/.test(src[j])) throw new CalcErr('syntax', 'malformed number literal “' + src.slice(i, j + 1) + '…”');
+        };
         if (c === '0' && (src[i + 1] === 'x' || src[i + 1] === 'X')) {
           var j = i + 2; while (j < n && /[0-9a-fA-F]/.test(src[j])) j++;
           if (j === i + 2) throw new CalcErr('syntax', 'incomplete hex literal');
+          badTail(j);
           toks.push({ t: 'num', base: 16, s: src.slice(i + 2, j) }); i = j; continue;
         }
         if (c === '0' && (src[i + 1] === 'b' || src[i + 1] === 'B') && /[01]/.test(src[i + 2] || '')) {
           var j2 = i + 2; while (j2 < n && /[01]/.test(src[j2])) j2++;
+          badTail(j2);
           toks.push({ t: 'num', base: 2, s: src.slice(i + 2, j2) }); i = j2; continue;
         }
         if (c === '0' && (src[i + 1] === 'o' || src[i + 1] === 'O')) {
           var j3 = i + 2; while (j3 < n && /[0-7]/.test(src[j3])) j3++;
           if (j3 === i + 2) throw new CalcErr('syntax', 'incomplete octal literal');
+          badTail(j3);
           toks.push({ t: 'num', base: 8, s: src.slice(i + 2, j3) }); i = j3; continue;
         }
         var m = /^(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/.exec(src.slice(i));
@@ -448,6 +460,7 @@
         var w = src.slice(i, j4);
         var lw = w.toLowerCase();
         if (lw === 'in') toks.push({ t: 'conv?', s: 'in' });        // resolved in a post-pass
+        else if (lw === 'as') toks.push({ t: 'op', s: 'to' });      // `as` is a convert synonym
         else if (WORDOPS[lw]) toks.push({ t: 'op', s: lw });
         else toks.push({ t: 'id', s: w });
         i = j4; continue;
@@ -459,7 +472,10 @@
       if (c === '×' || c === '⋅' || c === '·') { toks.push({ t: 'op', s: '*' }); i++; continue; }
       if (c === '÷') { toks.push({ t: 'op', s: '/' }); i++; continue; }
       if (c === '−') { toks.push({ t: 'op', s: '-' }); i++; continue; }
-      if (c === '=') { i++; continue; } // tolerate a trailing "="
+      if (c === '=') { // tolerate a TRAILING "=" only — a mid-expression "=" must not vanish (`1=2` is not 2)
+        if (/^\s*$/.test(src.slice(i + 1))) { i++; continue; }
+        throw new CalcErr('syntax', 'unexpected “=” — equations are not supported yet');
+      }
       throw new CalcErr('syntax', 'unexpected character “' + c + '”');
     }
     if (toks.length > MAXTOK) throw new CalcErr('syntax', 'expression too long');
@@ -475,11 +491,14 @@
         (!next || next.t === 'conv?' || (next.t === 'op' && next.s !== 'of') || next.t === ')');
       toks[kk] = inch ? { t: 'id', s: 'in' } : { t: 'op', s: 'to' };
     }
-    /* post-pass 2: '%' is MOD when a value follows, PERCENT otherwise */
+    /* post-pass 2: '%' is MOD when a value follows (including a unary-
+       signed one: `5 % -2`), PERCENT otherwise */
     for (var pp = 0; pp < toks.length; pp++) {
       if (toks[pp].t === 'op' && toks[pp].s === '%') {
         var nx = toks[pp + 1];
-        var isMod = nx && (nx.t === 'num' || nx.t === 'id' || nx.t === '(');
+        var isVal = function (t) { return t && (t.t === 'num' || t.t === 'id' || t.t === '(' || t.t === 'conv?'); };
+        var isMod = isVal(nx) ||
+          (nx && nx.t === 'op' && (nx.s === '-' || nx.s === '+' || nx.s === '~') && isVal(toks[pp + 2]));
         toks[pp].s = isMod ? 'mod' : '%pct';
       }
     }
@@ -496,7 +515,7 @@
     if (!tk || tk.t !== t) throw new CalcErr('syntax', tk ? 'unexpected “' + tk.s + '”' : 'unexpected end of expression');
     return tk;
   };
-  var BP = { to: 1, or: 2, xor: 3, and: 4, '<<': 5, '>>': 5, '+': 6, '-': 6, '*': 7, '/': 7, mod: 7, of: 7, '^': 9 };
+  var BP = { to: 1, or: 2, '|': 2, xor: 3, and: 4, '&': 4, '<<': 5, '>>': 5, '+': 6, '-': 6, '*': 7, '/': 7, mod: 7, of: 7, '^': 9 };
 
   Parser.prototype.parseExpr = function (minbp) {
     if (++this.depth > MAXDEPTH) throw new CalcErr('syntax', 'expression too deeply nested');
@@ -510,8 +529,10 @@
       if (tk.t === 'op' && BP[tk.s] !== undefined) { op = tk.s; bp = BP[tk.s]; }
       /* implicit multiplication (2pi, 3 km, 2(1+2)) binds TIGHTER than
          explicit * and / — so `20 L / 100 km` is (20 L)/(100 km) and
-         `1/2pi` is 1/(2π), matching unit intuition and Casio convention */
-      else if (tk.t === 'num' || tk.t === 'id' || tk.t === '(') { op = '*imp'; bp = 8; }
+         `1/2pi` is 1/(2π), matching unit intuition and Casio convention.
+         Deliberately NOT for a bare number after a number (`2 3`): silent
+         juxtaposition-as-multiplication answers typos like `0b10 2`. */
+      else if (tk.t === 'id' || tk.t === '(') { op = '*imp'; bp = 8; }
       else break;
       if (bp < minbp) break;
       if (op === 'to') {
@@ -658,7 +679,11 @@
     log: {
       n: -1, f: function (args) {
         if (args.length === 1) return mkF(Math.log10(posF(args[0], 'log')));
-        if (args.length === 2) return mkF(Math.log(posF(args[0], 'log')) / Math.log(posF(args[1], 'log base')));
+        if (args.length === 2) {
+          var base = posF(args[1], 'log base');
+          if (base === 1) throw new CalcErr('math', 'log base cannot be 1');
+          return mkF(Math.log(posF(args[0], 'log')) / Math.log(base));
+        }
         throw new CalcErr('math', 'log takes 1 or 2 arguments');
       }
     },
@@ -830,8 +855,8 @@
             return op === '+' ? addN(l, r) : subN(l, r);
           }
           if (op === '*') {
-            /* affine temperature: `25 degC` as a direct number×unit pair */
-            if (nd.implicit && nd.r.t === 'id') {
+            /* affine temperature: `25 degC` / `25 * degC` as a direct number×unit pair */
+            if (nd.r.t === 'id') {
               var u = lookupUnit(nd.r.name);
               if (u && u.off) {
                 var lv = ev(nd.l);
@@ -878,10 +903,8 @@
     if (CONSTS[lw] && (lw !== 'e' || name === 'e')) return CONSTS[lw]();
     var u = lookupUnit(name);
     if (u) {
-      if (u.off) { // bare affine unit (°C alone) — treat as linear scale reference
-        var ue0 = {}; ue0[name] = 1;
-        return mkQ(u.f, u.dim, ue0);
-      }
+      if (u.off) // a bare affine unit has no meaningful linear value
+        throw new CalcErr('math', 'write temperatures as “25 ' + name + '”, or convert with “to ' + name + '”');
       var ue = {}; ue[name] = 1;
       return mkQ(u.f, u.dim, ue);
     }
@@ -899,14 +922,15 @@
   };
   Evaluator.prototype.convert = function (nd, ev) {
     var val = ev(nd.x);
-    /* affine target: `x to degF` where target is a bare unit ident */
+    /* affine target: `x to degF` where target is a bare unit ident.
+       The quantity KEEPS its SI value — the affine offset is applied at
+       display time only (fmtNum), so chained converts and ans stay true. */
     if (nd.target.t === 'id') {
       var u = lookupUnit(nd.target.name);
       if (u && u.off) {
         if (val.k !== 'q' || !dimEq(val.dim, u.dim)) throw new CalcErr('math', 'unit mismatch: expected a temperature');
-        var out = divN(subN(val.v, u.off), u.f);
         var ue1 = {}; ue1[nd.target.name] = 1;
-        return { k: 'q', v: out, dim: u.dim, ue: ue1, display: true, affine: true };
+        return { k: 'q', v: val.v, dim: u.dim, ue: ue1 };
       }
     }
     var tgt = ev(nd.target);
@@ -920,8 +944,7 @@
       throw new CalcErr('math', 'left side has no units to convert');
     }
     if (!dimEq(val.dim, tgt.dim)) throw new CalcErr('math', 'unit mismatch: cannot convert ' + humanDim(val) + ' to ' + humanDim(tgt));
-    var shown = divN(val.v, tgt.v);
-    return { k: 'q', v: mulN(shown, tgt.v), dim: val.dim, ue: tgt.ue, display: true };
+    return { k: 'q', v: val.v, dim: val.dim, ue: tgt.ue };
   };
 
   /* ── formatting ─────────────────────────────────────────────────── */
@@ -990,8 +1013,16 @@
     }
     if (x.k === 'q') {
       var us = ueToString(x.ue);
-      var f = ueFactor(x.ue);
-      var disp = x.affine ? x.v : (f ? divN(x.v, f) : x.v); // affine convert already sits in target scale
+      var disp = null;
+      var qkeys = Object.keys(x.ue);
+      if (qkeys.length === 1 && x.ue[qkeys[0]] === 1) {
+        var au = lookupUnit(qkeys[0]);
+        if (au && au.off) disp = divN(subN(x.v, au.off), au.f); // affine scale, display-time only
+      }
+      if (!disp) {
+        var f = ueFactor(x.ue);
+        disp = f ? divN(x.v, f) : x.v;
+      }
       var inner = fmtNum(disp);
       if (inner.approx) { inner.text = inner.approx; inner.approx = null; } // quantities read as decimals, not fractions
       inner.text += ' ' + us;
@@ -1074,8 +1105,8 @@
     { dim: D(L, 3), units: ['L', 'mL', 'gal'], extra: [{ label: 'm^3', ue: { m: 3 } }] }
   ];
   function unitsCard(q) {
-    if (dimEq(q.dim, D(TH, 1))) { // temperature — affine three-way
-      var si = toF(q.affine ? addN(mulN(q.v, lookupUnit(Object.keys(q.ue)[0]).f), lookupUnit(Object.keys(q.ue)[0]).off || mkR(0n, 1n)) : q.v);
+    if (dimEq(q.dim, D(TH, 1))) { // temperature — affine three-way (q.v is always SI kelvin now)
+      var si = toF(q.v);
       return {
         t: 'units', title: 'temperature scales', rows: [
           [fmtF(si - 273.15), '°C'], [fmtF(si * 9 / 5 - 459.67), '°F'], [fmtF(si), 'K']
@@ -1124,7 +1155,6 @@
 
   /* ── date engine ────────────────────────────────────────────────── */
   var DATE_UNITS = { day: 'd', days: 'd', d: 'd', week: 'w', weeks: 'w', wk: 'w', month: 'mo', months: 'mo', mo: 'mo', year: 'y', years: 'y', yr: 'y', hour: 'h', hours: 'h', h: 'h', minute: 'mi', minutes: 'mi', min: 'mi' };
-  var WD = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   function dateSniff(src) {
     return /\b(today|now|tomorrow|yesterday)\b/i.test(src) || /\b\d{4}-\d{2}-\d{2}\b/.test(src);
   }
@@ -1153,16 +1183,20 @@
       else if (uu === 'y') addMonths(d, sign * 12 * nn);
       else if (uu === 'h') { d.setHours(d.getHours() + sign * nn); hasTime = true; }
       else if (uu === 'mi') { d.setMinutes(d.getMinutes() + sign * nn); hasTime = true; }
+      if (!Number.isFinite(d.getTime())) throw new CalcErr('math', 'date out of range'); // Date caps at ±275,760 years
     }
+    if (!Number.isFinite(d.getTime())) throw new CalcErr('math', 'date out of range');
     var iso = isoDate(d);
-    var rows = [['weekday', WD[d.getDay()]]];
-    if (hasTime) rows.push(['time', pad2(d.getHours()) + ':' + pad2(d.getMinutes())]);
+    /* drows are SEMANTIC (slug + numbers): the mount layer localises them
+       via i18n + Intl; engine text stays a neutral ISO string. */
+    var drows = [{ k: 'weekday', ts: d.getTime() }];
+    if (hasTime) drows.push({ k: 'time', hh: d.getHours(), mm: d.getMinutes() });
     var today0 = midnight(now), that0 = midnight(d);
     var dd = Math.round((that0 - today0) / 86400000);
-    if (any || dd !== 0) rows.push(['from today', dd === 0 ? 'same day' : (dd > 0 ? 'in ' + groupInt(String(dd)) + ' day' + (dd === 1 ? '' : 's') : groupInt(String(-dd)) + ' day' + (dd === -1 ? '' : 's') + ' ago')]);
-    rows.push(['day of year', String(dayOfYear(d))]);
-    rows.push(['ISO week', 'W' + pad2(isoWeek(d))]);
-    return { cards: [{ t: 'date', big: iso, rows: rows }], text: iso };
+    if (any || dd !== 0) drows.push({ k: 'fromToday', days: dd });
+    drows.push({ k: 'dayOfYear', n: dayOfYear(d) });
+    drows.push({ k: 'isoWeek', n: isoWeek(d) });
+    return { cards: [{ t: 'date', big: iso, drows: drows }], text: iso };
   }
   function parseDateAtom(s, now) {
     s = s.trim().toLowerCase();
@@ -1184,21 +1218,25 @@
     var days = Math.round((b0 - a0) / 86400000);
     var absDays = Math.abs(days);
     var from = new Date(Math.min(a0, b0)), to = new Date(Math.max(a0, b0));
-    var y = to.getFullYear() - from.getFullYear();
-    var mo = to.getMonth() - from.getMonth();
-    var dd = to.getDate() - from.getDate();
-    if (dd < 0) { mo--; var pm = new Date(to.getFullYear(), to.getMonth(), 0); dd += pm.getDate(); }
-    if (mo < 0) { y--; mo += 12; }
-    var parts = [];
-    if (y) parts.push(y + ' year' + (y > 1 ? 's' : ''));
-    if (mo) parts.push(mo + ' month' + (mo > 1 ? 's' : ''));
-    if (dd || !parts.length) parts.push(dd + ' day' + (dd === 1 ? '' : 's'));
-    var rows = [
-      ['calendar', parts.join(' ')],
-      ['weeks', Math.floor(absDays / 7) + ' wk ' + (absDays % 7) + ' d'],
-      ['direction', days >= 0 ? la.trim() + ' → ' + lb.trim() : lb.trim() + ' → ' + la.trim()]
-    ];
-    return { cards: [{ t: 'date', big: groupInt(String(absDays)) + ' day' + (absDays === 1 ? '' : 's'), rows: rows }], text: absDays + ' days' };
+    /* anchor-walk calendar breakdown: step whole months from `from`
+       (with day clamping) while we stay ≤ to, then count leftover real
+       days — a single subtract-and-borrow can leave dd negative
+       (2026-01-31 → 2026-03-01 used to show "1 month -2 days"). */
+    var months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+    var anchor = new Date(from); addMonths(anchor, months);
+    if (anchor > to) { months--; anchor = new Date(from); addMonths(anchor, months); }
+    var y = Math.floor(months / 12), mo = months % 12;
+    var dd = Math.round((midnight(to) - midnight(anchor)) / 86400000);
+    return {
+      cards: [{
+        t: 'date', days: absDays, drows: [
+          { k: 'calendar', y: y, mo: mo, d: dd },
+          { k: 'weeks', w: Math.floor(absDays / 7), d: absDays % 7 },
+          { k: 'direction', text: days >= 0 ? la.trim() + ' → ' + lb.trim() : lb.trim() + ' → ' + la.trim() }
+        ]
+      }],
+      text: absDays + ' days'
+    };
   }
   function midnight(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
   function midnightD(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
@@ -1223,6 +1261,10 @@
     opts = opts || {};
     src = String(src || '');
     if (!src.trim()) return { ok: false, kind: 'syntax', msg: 'empty' };
+    /* hard length gate BEFORE any parsing (including the date engine) —
+       MAXTOK alone doesn't bound a single million-digit literal entering
+       BigInt(), nor a date expression with thousands of ±N steps. */
+    if (src.length > 2000) return { ok: false, kind: 'math', msg: 'expression too long (2,000 characters max)' };
     try {
       if (dateSniff(src)) {
         var dr = dateEval(src, opts.now || Date.now());
