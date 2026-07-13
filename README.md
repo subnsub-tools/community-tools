@@ -26,6 +26,7 @@ algorithms; we keep the two in lockstep when tool logic changes.
 | [Screen Recorder](tools/rec/) | `recorder.js` | getDisplayMedia + MediaRecorder with mic/system-audio mixing and an idempotent stop path. |
 | [New File](tools/blank/) | `blank-files.js` | Empty files in 8 formats — the OOXML trio are hand-rolled minimal ECMA-376 packages. |
 | [Stego Detector](tools/stego/) | `stego-analyze.js` | Westfeld–Pfitzmann chi-square LSB steganalysis, bit-plane viewer, payload extractor. |
+| [Calc Pro](tools/calcpro/) | `calcpro-engine.js` | Wolfram-style math pad engine — exact BigInt rationals, unit/dimension algebra, bases & bitwise, date maths, closed-form detection. |
 
 Each directory is self-contained: one dependency-free module (pdf-lib being
 the one declared exception), one plain demo page, one README. Open any
