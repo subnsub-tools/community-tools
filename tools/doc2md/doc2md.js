@@ -25,11 +25,13 @@
 export const CAPS = {
   MAX_FILE: 50 * 1024 * 1024,
   MAX_PART: 32 * 1024 * 1024,   /* one member inside pptx/epub/zip */
+  MAX_INFLATE: 256 * 1024 * 1024, /* shared per-document inflate budget */
   MAX_PDF_PAGES: 300,
   MAX_PPTX_SLIDES: 300,
   MAX_EPUB_CH: 300,
   MAX_TABLE_ROWS: 2000,
   MAX_COLS: 64,
+  MAX_SHEETS: 50,
   MAX_ZIP_ENTRIES: 40,
   MAX_OUT_CHARS: 20 * 1024 * 1024,
   FENCE_CAP: 2 * 1024 * 1024,
@@ -38,6 +40,7 @@ export const CAPS = {
 const SLIDE_LABEL = 'Slide';
 const NOTES_LABEL = 'Notes';
 const TRUNC_WARN = 'Large input — part of the output was truncated.';
+const MEMBERS_WARN = 'Some parts could not be read and were skipped.';
 
 function mkErr(code) {
   const e = new Error(code);
@@ -76,16 +79,22 @@ export function zipEntries(u8) {
     if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
   }
   if (eocd < 0) throw mkErr('parse');
+  /* single-disk only; the CD must sit wholly before the EOCD and every
+     record must stay inside it — a truncated extra field or forged EOCD
+     offset used to let the walk run past the directory */
+  if (dv.getUint16(eocd + 4, true) !== 0 || dv.getUint16(eocd + 6, true) !== 0) throw mkErr('parse');
   const count = dv.getUint16(eocd + 10, true);
+  if (dv.getUint16(eocd + 8, true) !== count) throw mkErr('parse');
   const cdSize = dv.getUint32(eocd + 12, true);
   const cdOfs = dv.getUint32(eocd + 16, true);
   if (count === 0xFFFF || cdOfs === 0xFFFFFFFF || cdSize === 0xFFFFFFFF) throw mkErr('parse'); /* zip64 */
-  if (cdOfs + cdSize > n) throw mkErr('parse');
+  const cdEnd = cdOfs + cdSize;
+  if (cdEnd > eocd) throw mkErr('parse');
   const out = [];
   const dec = new TextDecoder();
   let p = cdOfs;
   for (let k = 0; k < count; k++) {
-    if (p + 46 > n || dv.getUint32(p, true) !== 0x02014b50) throw mkErr('parse');
+    if (p + 46 > cdEnd || dv.getUint32(p, true) !== 0x02014b50) throw mkErr('parse');
     const flags = dv.getUint16(p + 8, true);
     const method = dv.getUint16(p + 10, true);
     const csize = dv.getUint32(p + 20, true);
@@ -95,23 +104,34 @@ export function zipEntries(u8) {
     const cmtLen = dv.getUint16(p + 32, true);
     const lho = dv.getUint32(p + 42, true);
     if (csize === 0xFFFFFFFF || usize === 0xFFFFFFFF || lho === 0xFFFFFFFF) throw mkErr('parse'); /* zip64 */
+    const rec = 46 + nameLen + extraLen + cmtLen;
+    if (p + rec > cdEnd) throw mkErr('parse');
     const name = dec.decode(u8.subarray(p + 46, p + 46 + nameLen));
-    out.push({ name, dir: name.charAt(name.length - 1) === '/', enc: !!(flags & 0x1), method, csize, usize, lho });
-    p += 46 + nameLen + extraLen + cmtLen;
+    out.push({ name, dir: name.charAt(name.length - 1) === '/', enc: !!(flags & 0x1), method, csize, usize, lho, cdOfs });
+    p += rec;
   }
+  if (p !== cdEnd) throw mkErr('parse');
   return out;
 }
 
-export function zipRead(u8, ent, cap) {
+/* budget: optional { left } shared across one document — pptx slides, epub
+   chapters or zip members draw down a common inflate allowance so that many
+   individually-legal members can't add up to gigabytes. */
+export function zipRead(u8, ent, cap, budget) {
   if (ent.enc) return Promise.reject(mkErr('encrypted'));
   if (ent.method !== 0 && ent.method !== 8) return Promise.reject(mkErr('parse'));
   if (ent.usize > cap) return Promise.reject(mkErr('parse'));
+  if (budget) {
+    if (ent.usize > budget.left) return Promise.reject(mkErr('parse'));
+    budget.left -= ent.usize;
+  }
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   const p = ent.lho;
   if (p + 30 > u8.byteLength || dv.getUint32(p, true) !== 0x04034b50) return Promise.reject(mkErr('parse'));
   const nameLen = dv.getUint16(p + 26, true), extraLen = dv.getUint16(p + 28, true);
   const start = p + 30 + nameLen + extraLen;
-  if (start + ent.csize > u8.byteLength) return Promise.reject(mkErr('parse'));
+  /* member data may not run into the central directory (overlap trick) */
+  if (start + ent.csize > ent.cdOfs) return Promise.reject(mkErr('parse'));
   const slice = u8.subarray(start, start + ent.csize);
   if (ent.method === 0) {
     if (ent.csize !== ent.usize) return Promise.reject(mkErr('parse'));
@@ -160,10 +180,15 @@ function joinPath(base, rel) {
 const SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, TEMPLATE: 1, IFRAME: 1, OBJECT: 1, EMBED: 1, SVG: 1, CANVAS: 1, VIDEO: 1, AUDIO: 1, MAP: 1, BUTTON: 1, SELECT: 1, OPTION: 1, TEXTAREA: 1, INPUT: 1, LABEL: 1, FORM: 1, HEAD: 1, TITLE: 1, META: 1, LINK: 1, BASE: 1, DIALOG: 1 };
 const BLOCK_TAGS = { P: 1, DIV: 1, SECTION: 1, ARTICLE: 1, MAIN: 1, ASIDE: 1, HEADER: 1, FOOTER: 1, NAV: 1, FIGURE: 1, FIGCAPTION: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, UL: 1, OL: 1, TABLE: 1, PRE: 1, BLOCKQUOTE: 1, HR: 1, DL: 1, DT: 1, DD: 1, ADDRESS: 1, DETAILS: 1, SUMMARY: 1, CAPTION: 1, LI: 1 };
 
-function escMdCore(s) { return s.replace(/([\\`*_[\]|~])/g, '\\$1'); }
+/* Also escapes <, > and & — raw HTML passed through literally would execute
+   in any downstream renderer that allows inline HTML. CommonMark backslash
+   escapes cover all ASCII punctuation, so \< \> \& render literally. */
+function escMdCore(s) { return s.replace(/([\\`*_[\]|~<>&])/g, '\\$1'); }
 function escText(s) { return escMdCore(s.replace(/\s+/g, ' ')); }
 function fixLineStart(t) {
-  return t.replace(/^(\d+)([.)])(\s)/, '$1\\$2$3').replace(/^([#>+\-])/, '\\$1');
+  /* every physical line — a \-hard-break could smuggle "# heading" past a
+     first-line-only check */
+  return t.replace(/(^|\n)(\d+)([.)])(\s)/g, '$1$2\\$3$4').replace(/(^|\n)([#>+\-])/g, '$1\\$2');
 }
 function cleanInline(s) {
   return s.replace(/[ \t]{2,}/g, ' ').replace(/^[ \t]+|[ \t]+$/g, '');
@@ -215,7 +240,15 @@ function inlineOf(n) {
     const inner = cleanInline(inlineChildren(n));
     const href = n.getAttribute('href') || '';
     if (!inner) return '';
-    if (/^(https?:|mailto:)/i.test(href)) return '[' + inner + '](' + href.replace(/\(/g, '%28').replace(/\)/g, '%29') + ')';
+    if (/^(https?:|mailto:)/i.test(href)) {
+      /* parens break the () syntax; whitespace, control chars and <> can
+         terminate the destination early — percent-encode them */
+      const safe = href.replace(/[()\s\x00-\x1f<>]/g, (ch) => {
+        const h = ch.charCodeAt(0).toString(16).toUpperCase();
+        return '%' + (h.length < 2 ? '0' + h : h);
+      });
+      return '[' + inner + '](' + safe + ')';
+    }
     return inner;
   }
   return inlineChildren(n);
@@ -307,7 +340,9 @@ function cellDom(s) {
   return s.replace(/\\\n/g, '<br>').replace(/\n/g, '<br>');
 }
 function cellRaw(s) {
-  return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>').trim();
+  /* full literal escape (incl. <>&) — a cell reading "*x*" or "<b>" must
+     survive as text, not as markup downstream */
+  return escMdCore(String(s == null ? '' : s)).replace(/\r?\n/g, '<br>').trim();
 }
 function mdTable(rows) {
   let cols = 0;
@@ -366,13 +401,25 @@ export function convertDocx(u8, mammoth) {
 export function convertSheet(u8, XLSX) {
   if (!XLSX) return Promise.reject(mkErr('lib'));
   return Promise.resolve().then(() => {
-    const wb = XLSX.read(u8, { type: 'array' });
+    /* sheetRows caps what the parser materialises per sheet at read time;
+       the !ref clamp below stops sheet_to_json walking a lying range
+       (!ref=A1:XFD1048576 over a near-empty sheet) */
+    const wb = XLSX.read(u8, { type: 'array', sheetRows: CAPS.MAX_TABLE_ROWS + 1 });
     const parts = [];
     const warns = [];
     let truncated = false;
-    for (const name of wb.SheetNames) {
+    let names = wb.SheetNames;
+    if (names.length > CAPS.MAX_SHEETS) { names = names.slice(0, CAPS.MAX_SHEETS); truncated = true; }
+    for (const name of names) {
       const ws = wb.Sheets[name];
       if (!ws || !ws['!ref']) continue;
+      try {
+        const rng = XLSX.utils.decode_range(ws['!ref']);
+        let clamped = false;
+        if (rng.e.r - rng.s.r + 1 > CAPS.MAX_TABLE_ROWS) { rng.e.r = rng.s.r + CAPS.MAX_TABLE_ROWS - 1; clamped = true; }
+        if (rng.e.c - rng.s.c + 1 > CAPS.MAX_COLS) { rng.e.c = rng.s.c + CAPS.MAX_COLS - 1; clamped = true; }
+        if (clamped) { ws['!ref'] = XLSX.utils.encode_range(rng); truncated = true; }
+      } catch (_) {}
       let rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
       if (rows.length > CAPS.MAX_TABLE_ROWS) { rows.length = CAPS.MAX_TABLE_ROWS; truncated = true; }
       let any = false;
@@ -392,12 +439,23 @@ export function convertSheet(u8, XLSX) {
 }
 
 function sniffDelim(text) {
-  let line = '';
-  for (let i = 0; i < text.length && text.charAt(i) !== '\n' && i < 65536; i++) line += text.charAt(i);
+  /* quote-aware first-line count — '"Doe, Jane";42' must sniff ';', not
+     the comma inside the quoted field */
+  const counts = { ',': 0, ';': 0, '\t': 0 };
+  let q = false;
+  for (let i = 0; i < text.length && i < 65536; i++) {
+    const c = text.charAt(i);
+    if (q) {
+      if (c === '"') { if (text.charAt(i + 1) === '"') i++; else q = false; }
+      continue;
+    }
+    if (c === '"') { q = true; continue; }
+    if (c === '\n') break;
+    if (counts[c] !== undefined) counts[c]++;
+  }
   let best = ',', bestN = -1;
   for (const d of [',', ';', '\t']) {
-    const n = line.split(d).length - 1;
-    if (n > bestN) { bestN = n; best = d; }
+    if (counts[d] > bestN) { bestN = counts[d]; best = d; }
   }
   return best;
 }
@@ -483,12 +541,17 @@ export function convertPdf(u8, pdfjs) {
         .then((pg) => pg.getTextContent())
         .then((tc) => { const t = pageText(tc.items); if (t) parts.push(t); });
     }
-    const done = () => { try { doc.destroy(); } catch (_) {} };
-    return p.then(() => {
-      done();
+    /* destroy() is async — await it so back-to-back PDFs don't stack
+       worker teardowns, and swallow its rejection so cleanup can't mask
+       the real result */
+    const done = () => {
+      try { return Promise.resolve(doc.destroy()).catch(() => {}); }
+      catch (_) { return Promise.resolve(); }
+    };
+    return p.then(() => done().then(() => {
       if (!parts.length) throw mkErr('empty');
       return { md: parts.join('\n\n'), warns };
-    }, (e) => { done(); throw e; });
+    }), (e) => done().then(() => { throw e; }));
   }).catch((e) => {
     if (e && e.code) throw e;
     if (e && e.name === 'PasswordException') throw mkErr('encrypted');
@@ -519,10 +582,20 @@ function pptxParagraphs(txBody) {
     for (let k = 0; k < runs.length; k++) s += runs[k].textContent;
     s = s.replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
     if (!s) continue;
-    let lvl = 0;
+    let lvl = 0, bu = 0; /* bu: 1 explicit bullet, -1 explicit none, 0 no signal */
     const pprs = pr.getElementsByTagNameNS('*', 'pPr');
-    if (pprs.length && pprs[0].parentNode === pr) lvl = parseInt(pprs[0].getAttribute('lvl') || '0', 10) || 0;
-    texts.push({ s, lvl });
+    if (pprs.length && pprs[0].parentNode === pr) {
+      lvl = parseInt(pprs[0].getAttribute('lvl') || '0', 10) || 0;
+      /* explicit bullet markers beat the lvl heuristic (lvl=0 CAN be a
+         bulleted level, an indented buNone is not) — full master/layout
+         inheritance is out of scope for v1 */
+      for (let b = pprs[0].firstChild; b; b = b.nextSibling) {
+        if (b.nodeType !== 1) continue;
+        if (b.localName === 'buChar' || b.localName === 'buAutoNum') bu = 1;
+        else if (b.localName === 'buNone') bu = -1;
+      }
+    }
+    texts.push({ s, lvl, bu });
   }
   return texts;
 }
@@ -530,8 +603,11 @@ function pptxChunks(texts) {
   const chunks = [];
   let run = [];
   for (const x of texts) {
-    if (x.lvl > 0) run.push(' '.repeat((x.lvl - 1) * 2) + '- ' + escMdCore(x.s));
-    else {
+    const bullet = x.bu === 1 || (x.bu === 0 && x.lvl > 0);
+    if (bullet) {
+      const depth = Math.max(0, x.bu === 1 ? x.lvl : x.lvl - 1);
+      run.push(' '.repeat(depth * 2) + '- ' + escMdCore(x.s));
+    } else {
       if (run.length) { chunks.push(run.join('\n')); run = []; }
       chunks.push(fixLineStart(escMdCore(x.s)));
     }
@@ -539,6 +615,18 @@ function pptxChunks(texts) {
   if (run.length) chunks.push(run.join('\n'));
   return chunks;
 }
+function parseRels(bytes) {
+  const doc = xmlDoc(bytes);
+  const out = {};
+  if (!doc) return out;
+  const rs = doc.getElementsByTagNameNS('*', 'Relationship');
+  for (let i = 0; i < rs.length; i++) {
+    const id = rs[i].getAttribute('Id'), tg = rs[i].getAttribute('Target'), ty = rs[i].getAttribute('Type') || '';
+    if (id && tg) out[id] = { target: tg, type: ty };
+  }
+  return out;
+}
+const ODREL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 function pptxShapeType(txBody) {
   const sp = localAnc(txBody, 'sp');
   if (!sp) return '';
@@ -600,38 +688,97 @@ function parseSlideXml(bytes, forNotes) {
 export function convertPptx(u8) {
   needDS();
   const ents = zipEntries(u8);
-  const slides = [];
-  const notesByN = {};
-  let m;
-  for (const e of ents) {
-    if (e.dir) continue;
-    if ((m = /^ppt\/slides\/slide(\d+)\.xml$/.exec(e.name))) slides.push({ n: +m[1], e });
-    else if ((m = /^ppt\/notesSlides\/notesSlide(\d+)\.xml$/.exec(e.name))) notesByN[+m[1]] = e;
+  const byName = {};
+  const budget = { left: CAPS.MAX_INFLATE };
+  for (const e of ents) if (!e.dir) byName[e.name] = e;
+  /* Show order comes from presentation.xml's sldIdLst resolved through the
+     presentation rels — slideN.xml numbering is creation order and diverges
+     after a reorder. Numeric filename order stays as the fallback. */
+  function fallbackOrder() {
+    const slides = [];
+    let m;
+    for (const e of ents) {
+      if (e.dir) continue;
+      if ((m = /^ppt\/slides\/slide(\d+)\.xml$/.exec(e.name))) slides.push({ n: +m[1], e });
+    }
+    slides.sort((a, b) => a.n - b.n);
+    return slides;
   }
-  if (!slides.length) throw mkErr('parse');
-  slides.sort((a, b) => a.n - b.n);
-  const warns = [];
-  if (slides.length > CAPS.MAX_PPTX_SLIDES) { slides.length = CAPS.MAX_PPTX_SLIDES; warns.push(TRUNC_WARN); }
-  const parts = [];
-  let p = Promise.resolve();
-  slides.forEach((s) => {
-    p = p.then(() => zipRead(u8, s.e, CAPS.MAX_PART).then((b) => {
-      const slide = parseSlideXml(b, false);
-      if (!slide) return;
-      const head = '## ' + (slide.title ? escMdCore(slide.title) : SLIDE_LABEL + ' ' + s.n);
-      const body = slide.chunks.join('\n\n');
-      const note = notesByN[s.n];
-      if (!note) { parts.push(head + (body ? '\n\n' + body : '')); return; }
-      return zipRead(u8, note, CAPS.MAX_PART).then((nb) => {
-        const ns = parseSlideXml(nb, true);
-        const ntext = ns && ns.chunks.length ? ns.chunks.join('\n\n') : '';
-        parts.push(head + (body ? '\n\n' + body : '') + (ntext ? '\n\n### ' + NOTES_LABEL + '\n\n' + ntext : ''));
-      }, () => { parts.push(head + (body ? '\n\n' + body : '')); });
-    }));
-  });
-  return p.then(() => {
-    if (!parts.length) throw mkErr('empty');
-    return { md: parts.join('\n\n'), warns };
+  function orderedSlides() {
+    const pres = byName['ppt/presentation.xml'];
+    const prels = byName['ppt/_rels/presentation.xml.rels'];
+    if (!pres || !prels) return Promise.resolve(fallbackOrder());
+    return zipRead(u8, pres, CAPS.MAX_PART, budget).then((pb) =>
+      zipRead(u8, prels, CAPS.MAX_PART, budget).then((rb) => {
+        const pdoc = xmlDoc(pb);
+        const rels = parseRels(rb);
+        if (!pdoc) return fallbackOrder();
+        const out = [];
+        const ids = pdoc.getElementsByTagNameNS('*', 'sldId');
+        for (let j = 0; j < ids.length; j++) {
+          const rid = ids[j].getAttributeNS(ODREL_NS, 'id') || ids[j].getAttribute('r:id');
+          const rel = rid && rels[rid];
+          if (!rel) continue;
+          const e = byName[joinPath('ppt', rel.target)];
+          if (e) out.push({ n: j + 1, e });
+        }
+        return out.length ? out : fallbackOrder();
+      })).catch(() => fallbackOrder());
+  }
+  return orderedSlides().then((slides) => {
+    if (!slides.length) throw mkErr('parse');
+    const warns = [];
+    if (slides.length > CAPS.MAX_PPTX_SLIDES) { slides.length = CAPS.MAX_PPTX_SLIDES; warns.push(TRUNC_WARN); }
+    const parts = [];
+    let skipped = 0, outLen = 0, outFull = false;
+    const push = (chunk) => {
+      if (outFull) return;
+      parts.push(chunk);
+      outLen += chunk.length;
+      if (outLen > CAPS.MAX_OUT_CHARS) { outFull = true; warns.push(TRUNC_WARN); }
+    };
+    let p = Promise.resolve();
+    slides.forEach((s) => {
+      p = p.then(() => {
+        if (outFull) return;
+        /* notes hang off THIS slide's own rels, not a same-number file;
+           numeric pairing is only the no-rels fallback */
+        const relName = s.e.name.replace(/^(ppt\/slides\/)([^/]+)$/, '$1_rels/$2.rels');
+        const relEnt = byName[relName];
+        const notesP = relEnt
+          ? zipRead(u8, relEnt, CAPS.MAX_PART, budget).then((rb) => {
+              const rels = parseRels(rb);
+              for (const rid in rels) {
+                if (/notesSlide/.test(rels[rid].type)) return byName[joinPath('ppt/slides', rels[rid].target)] || null;
+              }
+              return null;
+            }, () => null)
+          : Promise.resolve((() => {
+              const m2 = /^ppt\/slides\/slide(\d+)\.xml$/.exec(s.e.name);
+              return (m2 && byName['ppt/notesSlides/notesSlide' + m2[1] + '.xml']) || null;
+            })());
+        return zipRead(u8, s.e, CAPS.MAX_PART, budget).then((b) => {
+          const slide = parseSlideXml(b, false);
+          if (!slide) { skipped++; return; }
+          const head = '## ' + (slide.title ? escMdCore(slide.title) : SLIDE_LABEL + ' ' + s.n);
+          const body = slide.chunks.join('\n\n');
+          return notesP.then((noteEnt) => {
+            if (!noteEnt) { push(head + (body ? '\n\n' + body : '')); return; }
+            return zipRead(u8, noteEnt, CAPS.MAX_PART, budget).then((nb) => {
+              const ns = parseSlideXml(nb, true);
+              if (!ns) skipped++;
+              const ntext = ns && ns.chunks.length ? ns.chunks.join('\n\n') : '';
+              push(head + (body ? '\n\n' + body : '') + (ntext ? '\n\n### ' + NOTES_LABEL + '\n\n' + ntext : ''));
+            }, () => { skipped++; push(head + (body ? '\n\n' + body : '')); });
+          });
+        }, () => { skipped++; });
+      });
+    });
+    return p.then(() => {
+      if (!parts.length) throw mkErr('empty');
+      if (skipped) warns.push(MEMBERS_WARN);
+      return { md: parts.join('\n\n'), warns };
+    });
   });
 }
 
@@ -639,16 +786,17 @@ export function convertEpub(u8) {
   needDS();
   const ents = zipEntries(u8);
   const byName = {};
+  const budget = { left: CAPS.MAX_INFLATE };
   for (const e of ents) if (!e.dir) byName[e.name] = e;
   const cont = byName['META-INF/container.xml'];
   if (!cont) throw mkErr('parse');
-  return zipRead(u8, cont, CAPS.MAX_PART).then((b) => {
+  return zipRead(u8, cont, CAPS.MAX_PART, budget).then((b) => {
     const doc = xmlDoc(b);
     const rf = doc && doc.getElementsByTagNameNS('*', 'rootfile')[0];
     const path = rf && rf.getAttribute('full-path');
     if (!path || !byName[path]) throw mkErr('parse');
     const base = path.indexOf('/') >= 0 ? path.slice(0, path.lastIndexOf('/')) : '';
-    return zipRead(u8, byName[path], CAPS.MAX_PART).then((ob) => ({ opf: ob, base }));
+    return zipRead(u8, byName[path], CAPS.MAX_PART, budget).then((ob) => ({ opf: ob, base }));
   }).then((st) => {
     const doc = xmlDoc(st.opf);
     if (!doc) throw mkErr('parse');
@@ -676,21 +824,30 @@ export function convertEpub(u8) {
     if (title) parts.push('# ' + escMdCore(title));
     if (creator) parts.push('*' + escMdCore(creator) + '*');
     const metaCount = parts.length;
+    let skipped = 0, outLen = 0, outFull = false;
     let p = Promise.resolve();
     chain.forEach((href) => {
       p = p.then(() => {
-        const full = joinPath(st.base, decodeURIComponent(href.split('#')[0]));
+        if (outFull) return;
+        let full;
+        try { full = joinPath(st.base, decodeURIComponent(href.split('#')[0])); }
+        catch (_) { skipped++; return; }
         const e = byName[full];
-        if (!e) return;
-        return zipRead(u8, e, CAPS.MAX_PART).then((b2) => {
+        if (!e) { skipped++; return; }
+        return zipRead(u8, e, CAPS.MAX_PART, budget).then((b2) => {
           const hd = new DOMParser().parseFromString(decodeText(b2), 'text/html');
           const md = htmlToMarkdown(hd.body);
-          if (md) parts.push(md);
-        }, () => { /* skip an unreadable chapter, keep the book */ });
+          if (md) {
+            parts.push(md);
+            outLen += md.length;
+            if (outLen > CAPS.MAX_OUT_CHARS) { outFull = true; warns.push(TRUNC_WARN); }
+          }
+        }, () => { skipped++; /* keep the book, but say so below */ });
       });
     });
     return p.then(() => {
       if (parts.length <= metaCount) throw mkErr('empty');
+      if (skipped) warns.push(MEMBERS_WARN);
       return { md: parts.join('\n\n'), warns };
     });
   });
@@ -747,16 +904,24 @@ function convertZip(u8, name, depth, libs) {
   const warns = [];
   if (list.length > CAPS.MAX_ZIP_ENTRIES) { list.length = CAPS.MAX_ZIP_ENTRIES; warns.push(TRUNC_WARN); }
   const parts = [];
+  const budget = { left: CAPS.MAX_INFLATE };
+  let outLen = 0, outFull = false;
   let p = Promise.resolve();
   list.forEach((e) => {
-    p = p.then(() => zipRead(u8, e, CAPS.MAX_FILE)
-      .then((b) => convertDocument(b, extOf(e.name), e.name, libs, depth + 1))
-      .then((r) => {
-        parts.push('## ' + escMdCore(e.name) + '\n\n' + r.md);
-        for (const w of r.warns) warns.push(e.name + ': ' + w);
-      }, (err) => {
-        parts.push('## ' + escMdCore(e.name) + '\n\n*conversion failed: ' + ((err && err.code) || 'parse') + '*');
-      }));
+    p = p.then(() => {
+      if (outFull) return;
+      return zipRead(u8, e, CAPS.MAX_FILE, budget)
+        .then((b) => convertDocument(b, extOf(e.name), e.name, libs, depth + 1))
+        .then((r) => {
+          const chunk = '## ' + escMdCore(e.name) + '\n\n' + r.md;
+          parts.push(chunk);
+          outLen += chunk.length;
+          if (outLen > CAPS.MAX_OUT_CHARS) { outFull = true; warns.push(TRUNC_WARN); }
+          for (const w of r.warns) warns.push(e.name + ': ' + w);
+        }, (err) => {
+          parts.push('## ' + escMdCore(e.name) + '\n\n*conversion failed: ' + ((err && err.code) || 'parse') + '*');
+        });
+    });
   });
   return p.then(() => ({ md: parts.join('\n\n---\n\n'), warns }));
 }
