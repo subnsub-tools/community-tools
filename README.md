@@ -26,7 +26,6 @@ algorithms; we keep the two in lockstep when tool logic changes.
 | [Screen Recorder](tools/rec/) | `recorder.js` | getDisplayMedia + MediaRecorder with mic/system-audio mixing and an idempotent stop path. |
 | [New File](tools/blank/) | `blank-files.js` | Empty files in 8 formats — the OOXML trio are hand-rolled minimal ECMA-376 packages. |
 | [Stego Detector](tools/stego/) | `stego-analyze.js` | Westfeld–Pfitzmann chi-square LSB steganalysis, bit-plane viewer, payload extractor. |
-| [Doc to Markdown](tools/doc2md/) | `doc2md.js` | markitdown-style document→Markdown: DOCX/XLSX/PPTX/PDF/EPUB/HTML/CSV pipelines over a bounded built-in zip reader and an HTML→GFM serializer. |
 
 Each directory is self-contained: one dependency-free module (pdf-lib being
 the one declared exception), one plain demo page, one README. Open any
