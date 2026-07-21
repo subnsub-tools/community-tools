@@ -26,6 +26,7 @@ algorithms; we keep the two in lockstep when tool logic changes.
 | [Screen Recorder](tools/rec/) | `recorder.js` | getDisplayMedia + MediaRecorder with mic/system-audio mixing and an idempotent stop path. |
 | [New File](tools/blank/) | `blank-files.js` | Empty files in 8 formats — the OOXML trio are hand-rolled minimal ECMA-376 packages. |
 | [Stego Detector](tools/stego/) | `stego-analyze.js` | Westfeld–Pfitzmann chi-square LSB steganalysis, bit-plane viewer, payload extractor. |
+| [World Cup 2026](tools/worldcup/) | `worldcup-schedule.js` | Schedule normalisation, group tables, kickoff time-zone handling — the 2026 tournament archive. |
 
 Each directory is self-contained: one dependency-free module (pdf-lib being
 the one declared exception), one plain demo page, one README. Open any
