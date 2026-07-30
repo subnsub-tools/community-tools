@@ -1,0 +1,4 @@
+repository: https://github.com/subnsub-tools/community-tools
+anchored-head: 7a7e30041cdc51b9bd127e997753d28cfa258554
+anchored-tree: 8bc386301fc11a901a0a99f95e9f4fd4e2f9c99a
+anchor-date: 2026-07-30
