@@ -1,5 +1,11 @@
 # Image Convert
 
+> **Superseded.** The Image Convert tool became the Image section of
+> **Format** on subnsub.com, and its logic now lives — with AVIF and the
+> batch path added — in [`tools/format/`](../format/). This module is kept
+> as published, so anything already importing it keeps working, but new
+> work should start from `format-image.js`.
+
 Convert photos to JPEG, PNG or WebP with a quality dial — HEIC input
 included, fully offline. This is the core logic of the
 [Image Convert tool on subnsub.com](https://subnsub.com).

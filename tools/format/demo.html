@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Format — demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  label { display: block; margin: .75rem 0; }
+  h2 { margin-top: 2.5rem; }
+  .err { color: #b00020; }
+  .note { color: #555; font-size: 13px; }
+</style>
+
+<h1>Format — demo</h1>
+<p class="note">Both halves run entirely in this page. No HEIC decoder and no
+AVIF wasm encoder are wired in here, so HEIC input works only where the
+browser decodes it natively (Safari) and AVIF output only where it encodes
+natively (Chromium). Audio output is WAV — the MP3/OGG/FLAC/AAC encoders are
+vendored on the site and are not part of this module.</p>
+
+<h2>Image</h2>
+<label>Image <input type="file" id="img" accept="image/*"></label>
+<label>Format
+  <select id="ifmt"><option>jpeg</option><option>png</option><option>webp</option><option>avif</option></select>
+</label>
+<label>Quality <input type="range" id="q" min="1" max="100" value="85"> <span id="qv">85%</span></label>
+<button id="irun" disabled>Convert</button>
+<p id="istatus"></p>
+
+<h2>Audio → WAV</h2>
+<label>Audio <input type="file" id="aud" accept="audio/*"></label>
+<button id="arun" disabled>Convert</button>
+<p id="astatus"></p>
+
+<script type="module">
+  import { convertImage, nativeCanEncode } from './format-image.js';
+  import { decodeAudio, buildEncodeJob, encodeWav, outputName } from './format-audio.js';
+
+  const $ = (id) => document.getElementById(id);
+  const say = (el, m, e) => { $(el).textContent = m; $(el).className = e ? 'err' : ''; };
+  const size = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
+  /* One download link per section, replaced (and revoked) on each run. */
+  function offer(el, bytes, type, name, note) {
+    const url = URL.createObjectURL(new Blob([bytes], { type }));
+    const p = $(el);
+    p.textContent = note + ' ';
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.textContent = 'Download ' + name;
+    a.addEventListener('click', () => setTimeout(() => URL.revokeObjectURL(url), 0), { once: true });
+    p.appendChild(a);
+    p.className = '';
+  }
+
+  $('q').oninput = () => { $('qv').textContent = $('q').value + '%'; };
+  $('img').onchange = () => { $('irun').disabled = !$('img').files[0]; say('istatus', ''); };
+  $('aud').onchange = () => { $('arun').disabled = !$('aud').files[0]; say('astatus', ''); };
+
+  $('irun').onclick = async () => {
+    const f = $('img').files[0];
+    if (!f) return;
+    const fmt = $('ifmt').value;
+    if (fmt === 'avif' && !nativeCanEncode('image/avif')) {
+      say('istatus', 'This browser has no native AVIF encoder — inject one as encodeAvif().', true);
+      return;
+    }
+    $('irun').disabled = true;
+    say('istatus', 'Converting…');
+    try {
+      const out = await convertImage(f, { format: fmt, quality: $('q').value / 100 });
+      offer('istatus', out.bytes, out.type, out.name, size(out.inSize) + ' → ' + size(out.outSize) + '.');
+    } catch (err) {
+      say('istatus', 'Failed: ' + (err.code || err.message) + (err.mp ? ' (' + err.mp + ' MP)' : ''), true);
+    }
+    $('irun').disabled = false;
+  };
+
+  $('arun').onclick = async () => {
+    const f = $('aud').files[0];
+    if (!f) return;
+    $('arun').disabled = true;
+    say('astatus', 'Decoding…');
+    try {
+      const buffer = await decodeAudio(f);
+      const job = buildEncodeJob(buffer, { format: 'wav' });
+      const bytes = encodeWav(job);
+      offer('astatus', bytes, 'audio/wav', outputName(f.name, 'wav'),
+        job.channels.length + ' ch · ' + job.sampleRate + ' Hz · ' + size(bytes.length) + '.');
+    } catch (err) {
+      say('astatus', 'Failed: ' + (err.code || err.message), true);
+    }
+    $('arun').disabled = false;
+  };
+</script>
