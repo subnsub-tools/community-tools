@@ -27,8 +27,36 @@ memory. pdf-lib loads from a CDN; nothing is uploaded anywhere.</p>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"
         integrity="sha384-weMABwrltA6jWR8DDe9Jp5blk+tZQh7ugpCsF3JwSA53WZM9/14PjS5LAJNHNjAI"
         crossorigin="anonymous"></script>
+<hr style="margin:2rem 0">
+
+<h2>Clean copied text</h2>
+<p>Undo the hard line breaks that come along when you copy text <em>out</em> of
+a PDF. No file, no pdf-lib — plain string work.</p>
+
+<label>Pasted text <textarea id="rflIn" rows="6" style="width:100%">Recent advances in transformer
+architectures have shown that
+scaling laws hold across modalities.
+
+这是一段从 PDF 里复制
+出来的中文，带着硬换行。</textarea></label>
+
+<fieldset>
+  <legend>Line breaks</legend>
+  <label><input type="radio" name="rmode" value="para" checked> Keep paragraphs</label>
+  <label><input type="radio" name="rmode" value="one"> Join everything</label>
+</fieldset>
+<fieldset>
+  <legend>At each join</legend>
+  <label><input type="radio" name="rjoin" value="smart" checked> Smart space</label>
+  <label><input type="radio" name="rjoin" value="space"> Always a space</label>
+  <label><input type="radio" name="rjoin" value="none"> No space</label>
+</fieldset>
+
+<p>Result</p>
+<div id="rflOut" style="font-family:ui-monospace,monospace;white-space:pre-wrap;border:1px solid #ccc;padding:.5rem;min-height:3rem"></div>
+
 <script type="module">
-  import { mergePdfs, extractPages, imagesToPdf } from './pdf-tools.js';
+  import { mergePdfs, extractPages, imagesToPdf, reflowText } from './pdf-tools.js';
 
   const $ = (id) => document.getElementById(id);
   const status = (m, e) => { $('status').textContent = m; $('status').className = e ? 'err' : ''; };
@@ -56,4 +84,13 @@ memory. pdf-lib loads from a CDN; nothing is uploaded anywhere.</p>
       status(`Failed (${e.code || e.message})${e.fileName ? ': ' + e.fileName : ''}`, true);
     }
   };
+
+  /* Clean copied text — no file, no pdf-lib. */
+  const picked = (name) => document.querySelector(`input[name="${name}"]:checked`).value;
+  const reflowRun = () => {
+    $('rflOut').textContent = reflowText($('rflIn').value, { mode: picked('rmode'), join: picked('rjoin') });
+  };
+  $('rflIn').oninput = reflowRun;
+  document.querySelectorAll('input[name="rmode"], input[name="rjoin"]').forEach((r) => { r.onchange = reflowRun; });
+  reflowRun();
 </script>

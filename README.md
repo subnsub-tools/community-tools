@@ -20,7 +20,7 @@ algorithms; we keep the two in lockstep when tool logic changes.
 |---|---|---|
 | [File Encrypt](tools/encrypt/) | `encrypt.js` | AES-256-GCM password sealing (PBKDF2-SHA256 · 600k). The [`.snse` container format](tools/encrypt/FORMAT.md) is fully specified, with a Python reference decryptor — your files are never locked to our code. |
 | [EXIF Cleaner](tools/exif/) | `exif-clean.js` | Byte-level metadata strip for JPEG/PNG/WebP — pixels copied verbatim, never re-encoded. |
-| [PDF Tools](tools/pdf/) | `pdf-tools.js` | Merge, page-extract, images→PDF on top of pdf-lib, with declared-size guards before any decoder runs. |
+| [PDF Tools](tools/pdf/) | `pdf-tools.js` | Merge, page-extract, images→PDF and annotation on top of pdf-lib, with declared-size guards before any decoder runs — plus the line-break cleanup for text copied out of a PDF (no pdf-lib involved). |
 | [Format](tools/format/) | `format-image.js` · `format-audio.js` | Image re-encode to JPEG/PNG/WebP/AVIF and the sample-level half of audio conversion — down-mix, quantiser, WAV writer. Succeeds the earlier [Image Convert](tools/imgconv/) module, whose tool became its Image section. |
 | [Watermark](tools/wmark/) | `watermark.js` | Tiled text watermarks, batch → hand-built store-only ZIP. |
 | [Screen Recorder](tools/rec/) | `recorder.js` | getDisplayMedia + MediaRecorder with mic/system-audio mixing and an idempotent stop path. |
